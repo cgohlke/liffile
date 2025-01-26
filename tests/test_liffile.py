@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.1.25
+:Version: 2025.1.26
 
 """
 
@@ -51,6 +51,7 @@ import numpy
 import pytest
 import xarray
 from liffile import (
+    FILE_EXTENSIONS,
     LifFile,
     LifFileError,
     LifImage,
@@ -923,8 +924,8 @@ def test_liffile(filetype):
         assert im.sizes == {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128}
         assert 'C' not in im.coords
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 10.657])
-        assert_allclose(im.coords['Z'][[0, -1]], [4.999881e-06, -1.000024e-05])
-        assert_allclose(im.coords['Y'][[0, -1]], [-3.418137e-05, 3.999996e-04])
+        assert_allclose(im.coords['Z'][[0, -1]], [4.999881e-06, -5.000359e-06])
+        assert_allclose(im.coords['Y'][[0, -1]], [-3.418137e-05, 3.658182e-04])
         assert_allclose(im.coords['X'][[0, -1]], [8.673617e-20, 3.999996e-04])
         assert im.attrs['path'] == im.parent.name + '/' + im.path
         assert len(im.timestamps) == 70
@@ -1011,6 +1012,12 @@ def test_flim():
         data = intensity.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float32
+        assert data.attrs['TileScanInfo']['Tile']['PosX'] == -0.0471300149
+
+        mean = lif.series['Phasor Intensity$']
+        data = mean.asxarray()
+        assert data.shape == (1024, 1024)
+        assert data.dtype == numpy.float16
         assert data.attrs['TileScanInfo']['Tile']['PosX'] == -0.0471300149
 
         real = lif.series['Phasor Real']
