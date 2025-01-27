@@ -4,7 +4,7 @@ include CHANGES.rst
 include pyproject.toml
 
 include liffile/py.typed
-# include liffile/_liffile.pyx
+include liffile/_liffile.pyx
 
 include docs/conf.py
 include docs/index.rst
@@ -13,6 +13,7 @@ include docs/_static/custom.css
 # include .github/workflows/wheel.yml
 
 exclude *.cmd
+exclude mypy.ini
 recursive-exclude doc *
 recursive-exclude docs *
 recursive-exclude test *
