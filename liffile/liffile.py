@@ -37,7 +37,8 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.1.25
+:Version: 2025.1.26
+:DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
 ----------
@@ -66,6 +67,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.1.26
+
+- Fix image coordinate values.
+- Prompt for file name if main is called without arguments.
 
 2025.1.25
 
@@ -133,7 +139,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.1.25'
+__version__ = '2025.1.26'
 
 __all__ = [
     '__version__',
@@ -144,6 +150,7 @@ __all__ = [
     'LifImageSeries',
     'LifFileError',
     'LifMemoryBlock',
+    'FILE_EXTENSIONS',
 ]
 
 import logging
@@ -648,8 +655,13 @@ class LifImage:
         for dim in self._dimensions:
             if squeeze and dim.number_elements == 1:
                 continue
+            if dim.length == 0 and dim.number_elements > 1:
+                continue
             coords[dim.label] = numpy.linspace(
-                dim.origin, dim.length, dim.number_elements, endpoint=True
+                dim.origin,
+                dim.origin + dim.length,
+                dim.number_elements,
+                endpoint=True,
             )
         return coords
 
@@ -1119,6 +1131,7 @@ DIMENSION_ID = {
     10: 'M',  # mosaic position
     11: 'L',  # loop
 }
+"""Map dimension id to character code."""
 
 CHANNEL_TAG = {
     0: 'Gray',
@@ -1126,6 +1139,18 @@ CHANNEL_TAG = {
     2: 'Green',
     3: 'Blue',
 }
+"""Map channel tag to name."""
+
+FILE_EXTENSIONS = {
+    '.lif': LifFile,
+    # '.lof': LofFile,
+    # '.xlif': XlifFile,
+    # '.xlef': XlefFile,
+    # '.xllf': XllfFile,
+    # '.lifext': LifextFile,
+    # '.xlcf': XlcfFile,
+}
+"""Supported file extensions of Leica image files."""
 
 
 def create_output(
@@ -1228,6 +1253,18 @@ def logger() -> logging.Logger:
     return logging.getLogger(__name__.replace('liffile.liffile', 'liffile'))
 
 
+def askopenfilename(**kwargs: Any) -> str:
+    """Return file name(s) from Tkinter's file open dialog."""
+    from tkinter import Tk, filedialog
+
+    root = Tk()
+    root.withdraw()
+    root.update()
+    filenames = filedialog.askopenfilename(**kwargs)
+    root.destroy()
+    return filenames
+
+
 def main(argv: list[str] | None = None) -> int:
     """Command line usage main function.
 
@@ -1237,19 +1274,6 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     from glob import glob
-
-    if argv is None:
-        argv = sys.argv
-
-    if len(argv) > 1 and '--doctest' in argv:
-        import doctest
-
-        try:
-            import liffile.liffile as m
-        except ImportError:
-            m = None  # type: ignore[assignment]
-        doctest.testmod(m, optionflags=doctest.ELLIPSIS)
-        return 0
 
     imshow: Any
     try:
@@ -1263,8 +1287,18 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         xarray = None
 
+    if argv is None:
+        argv = sys.argv
+
     if len(argv) == 1:
-        files = glob('*.lif')
+        path = askopenfilename(
+            title='Select a TIFF file',
+            filetypes=[
+                (f'{ext.upper()} files', f'*{ext}') for ext in FILE_EXTENSIONS
+            ]
+            + [('All files', '*')],
+        )
+        files = [path] if path else []
     elif '*' in argv[1]:
         files = glob(argv[1])
     elif os.path.isdir(argv[1]):
@@ -1273,7 +1307,7 @@ def main(argv: list[str] | None = None) -> int:
         files = argv[1:]
 
     for fname in files:
-        if os.path.splitext(fname)[-1].lower() not in {'.lif'}:
+        if os.path.splitext(fname)[-1].lower() not in FILE_EXTENSIONS:
             continue
         try:
             with LifFile(fname) as lif:
@@ -1285,14 +1319,16 @@ def main(argv: list[str] | None = None) -> int:
                     im: Any
                     if xarray is not None:
                         im = image.asxarray()
+                        data = im.data
                     else:
                         im = image.asarray()
+                        data = im
                     print(im)
                     print()
                     pm = 'RGB' if image.dims[-1] == 'S' else 'MINISBLACK'
                     try:
                         imshow(
-                            im,
+                            data,
                             title=repr(image),
                             show=i == len(lif.series) - 1,
                             photometric=pm,
