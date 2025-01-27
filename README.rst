@@ -10,7 +10,8 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.1.25
+:Version: 2025.1.26
+:DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
 ----------
@@ -39,6 +40,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.1.26
+
+- Fix image coordinate values.
+- Prompt for file name if main is called without arguments.
 
 2025.1.25
 
