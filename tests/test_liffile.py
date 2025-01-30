@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.1.26
+:Version: 2025.1.30
 
 """
 
@@ -892,7 +892,6 @@ def test_liffile(filetype):
         assert lif.datetime == datetime.datetime(
             2013, 12, 2, 8, 27, 44, tzinfo=datetime.timezone.utc
         )
-        assert lif.flim_rawdata == {}
         assert len(lif.memory_blocks) == 240
         assert isinstance(lif.xml_header, str)
         assert isinstance(lif.xml_element, ElementTree.Element)
@@ -917,6 +916,10 @@ def test_liffile(filetype):
         assert im.parent == lif
         assert im.name == 'XYZT'
         assert im.path == 'XYZT'
+        assert im.index == 5
+        assert im.guid == '06f46831-5b37-11e3-8f53-eccd6d2154b5'
+        assert len(im.xml_element) > 0
+        assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.shape == (7, 5, 2, 128, 128)
@@ -1005,34 +1008,39 @@ def test_flim():
     """Test read FLIM dataset."""
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
     with LifFile(filename) as lif:
-        flim = lif.flim_rawdata
-        assert flim['LaserPulseFrequency'] == 19505000
+        # flim = lif.flim_rawdata
+        # assert flim['LaserPulseFrequency'] == 19505000
 
         intensity = lif.series['/Intensity']
+        assert intensity.xml_element_smd is not None
         data = intensity.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float32
         assert data.attrs['TileScanInfo']['Tile']['PosX'] == -0.0471300149
 
         mean = lif.series['Phasor Intensity$']
+        assert mean.xml_element_smd is not None
         data = mean.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
         assert data.attrs['TileScanInfo']['Tile']['PosX'] == -0.0471300149
 
         real = lif.series['Phasor Real']
+        assert real.xml_element_smd is not None
         data = real.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
         assert data.attrs['F16']['FactorF32ToF16'] == 1.0
 
         real = lif.series['Fast Flim']
+        assert real.xml_element_smd is not None
         data = real.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
         assert data.attrs['F16']['FactorF32ToF16'] == 1000000000.0
 
         mask = lif.series['Phasor Mask']
+        assert mask.xml_element_smd is not None
         data = mask.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.uint32
@@ -1114,6 +1122,7 @@ def test_glob(fname):
             str(image)
             image.asxarray()
             image.timestamps
+            image.xml_element_smd
 
 
 if __name__ == '__main__':
