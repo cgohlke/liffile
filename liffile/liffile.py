@@ -37,7 +37,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.1.26
+:Version: 2025.1.30
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -67,6 +67,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.1.30
+
+- Remove LifFile.flim_rawdata (breaking).
+- Add index, guid, and xml_element_smd properties to LifImage.
 
 2025.1.26
 
@@ -100,6 +105,7 @@ The Leica Image File format is documented at:
   Leica Microsystems GmbH. 21 September 2016.
 - Annotations to Leica Image File Formats for LAS X Version 3.x. Version 1.4.
   Leica Microsystems GmbH. 24 August 2016.
+- TSC SP8 FALCON File Format Description. LAS X Version 3.5.0.
 
 Other implementations for reading Leica LIF files are
 `readlif <https://github.com/Arcadia-Science/readlif>`_ and
@@ -108,7 +114,7 @@ Other implementations for reading Leica LIF files are
 Examples
 --------
 
-Read image and metadata from a LIF file:
+Read a FLIM lifetime image and metadata from a LIF file:
 
 >>> with LifFile('tests/data/FLIM.lif') as lif:
 ...     for image in lif.series:
@@ -139,7 +145,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.1.26'
+__version__ = '2025.1.30'
 
 __all__ = [
     '__version__',
@@ -386,20 +392,6 @@ class LifFile:
         """Return image series in file."""
         return LifImageSeries(self)
 
-    @property
-    def flim_rawdata(self) -> dict[str, Any]:
-        """Return settings from SingleMoleculeDetection/RawData XML element."""
-        # TODO: move this into LifFlimCompressed class
-        rawdata = self.xml_element.find(
-            './/Element/Data/SingleMoleculeDetection/Dataset/RawData'
-        )
-        if rawdata is None:
-            return {}
-        flim_rawdata: dict[str, Any] = xml2dict(rawdata)['RawData']
-        flim_rawdata.pop('Channels', None)
-        flim_rawdata.pop('Dimensions', None)
-        return flim_rawdata
-
     def close(self) -> None:
         """Close file handle and free resources."""
         if self._close:
@@ -457,21 +449,39 @@ class LifImage:
     path: str
     """Path of image in image tree."""
 
+    index: int
+    """Index of image in LIF file."""
+
     def __init__(
         self,
         parent: LifFile,
         xml_element: ElementTree.Element,
         path: str,
+        index: int,
         /,
     ) -> None:
         self.parent = parent
         self.xml_element = xml_element
         self.path = path
+        self.index = index
 
     @property
     def name(self) -> str:
         """Name of image."""
         return os.path.split(self.path)[-1]
+
+    @property
+    def guid(self) -> str | None:
+        """Unique identifier of image, if any."""
+        return self.xml_element.attrib.get('UniqueID')
+
+    @property
+    def xml_element_smd(self) -> ElementTree.Element | None:
+        """Parent SingleMoleculeDetection XML element, if any."""
+        guid = self.guid
+        return self.parent.xml_element.find(
+            f'.//Element[@UniqueID="{guid}"]../../Data/SingleMoleculeDetection'
+        )
 
     @cached_property
     def _dimensions(self) -> tuple[LifDimension, ...]:
@@ -552,7 +562,9 @@ class LifImage:
                 )
             )
 
-        return tuple(channels)
+        return tuple(
+            sorted(channels, key=lambda x: x.bytes_inc, reverse=False)
+        )
 
     @cached_property
     def dtype(self) -> numpy.dtype[Any]:
@@ -595,12 +607,13 @@ class LifImage:
             if squeeze and dim.number_elements < 2:
                 continue
             if stride != dim.bytes_inc:
-                # assert stride * len(channels) == d[2]
+                assert dim.bytes_inc % stride == 0
                 size = dim.bytes_inc // stride
                 ax = 'S' if i == 0 else 'C' if 'C' not in sizes else f'C{ch}'
                 if ax != 'S':
                     ch += 1
                 sizes[ax] = size
+                assert nchannels % size == 0
                 nchannels //= size
             sizes[dim.label] = dim.number_elements
             stride = dim.number_elements * dim.bytes_inc
@@ -814,13 +827,15 @@ class LifImage:
         # TODO: make columns configurable?
         # such that it can be set to os.get_terminal_size().columns
         columns = 115
+        name = self.__class__.__name__
+        index = self.index
         path = self.path
         dtype = self.dtype
         sizes = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
-        r = f'<{self.__class__.__name__} {path!r}  ({sizes})  {dtype}>'
-        if len(r) > columns:
-            path = '… ' + self.path[len(r) - columns - 2 :]
-            r = f'<{self.__class__.__name__} {path!r}  ({sizes})  {dtype}>'
+        r = f'<{name} {index} {path!r} ({sizes}) {dtype}>'
+        if len(r) > columns + 2:
+            path = '… ' + self.path[len(r) - columns :]
+            r = f'<{name} {index} {path!r} ({sizes}) {dtype}>'
         return r
 
     def __str__(self) -> str:
@@ -840,9 +855,11 @@ class LifImageSeries(Sequence[LifImage]):
         self._parent = parent
         self._images = {
             path.split('/', 1)[-1]: LifImage(
-                parent, image, path.split('/', 1)[-1]
+                parent, image, path.split('/', 1)[-1], index
             )
-            for path, image in LifImageSeries._image_iter(parent.xml_element)
+            for index, (path, image) in enumerate(
+                LifImageSeries._image_iter(parent.xml_element)
+            )
         }
 
     @staticmethod
