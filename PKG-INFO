@@ -1,6 +1,6 @@
 Metadata-Version: 2.2
 Name: liffile
-Version: 2025.1.26
+Version: 2025.1.30
 Summary: Read Leica image files (LIF)
 Home-page: https://www.cgohlke.com
 Author: Christoph Gohlke
@@ -50,7 +50,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.1.26
+:Version: 2025.1.30
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -80,6 +80,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.1.30
+
+- Remove LifFile.flim_rawdata (breaking).
+- Add index, guid, and xml_element_smd properties to LifImage.
 
 2025.1.26
 
@@ -113,6 +118,7 @@ The Leica Image File format is documented at:
   Leica Microsystems GmbH. 21 September 2016.
 - Annotations to Leica Image File Formats for LAS X Version 3.x. Version 1.4.
   Leica Microsystems GmbH. 24 August 2016.
+- TSC SP8 FALCON File Format Description. LAS X Version 3.5.0.
 
 Other implementations for reading Leica LIF files are
 `readlif <https://github.com/Arcadia-Science/readlif>`_ and
@@ -121,7 +127,7 @@ Other implementations for reading Leica LIF files are
 Examples
 --------
 
-Read image and metadata from a LIF file:
+Read a FLIM lifetime image and metadata from a LIF file:
 
 >>> with LifFile('tests/data/FLIM.lif') as lif:
 ...     for image in lif.series:
