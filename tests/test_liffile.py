@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.1.31
+:Version: 2025.2.2
 
 """
 
@@ -54,7 +54,9 @@ from liffile import (
     FILE_EXTENSIONS,
     LifFile,
     LifFileError,
+    LifFlimImage,
     LifImage,
+    LifImageABC,
     LifImageSeries,
     LifMemoryBlock,
     __version__,
@@ -889,6 +891,7 @@ def test_liffile(filetype):
             assert lif.filename == ''
         assert lif.name == 'ScanModiBeispiele.lif'
         assert lif.version == 2
+        assert lif.uuid == '9da018ae-5b2b-11e3-8f53-eccd6d2154b5'
         assert lif.datetime == datetime.datetime(
             2013, 12, 2, 8, 27, 44, tzinfo=datetime.timezone.utc
         )
@@ -920,7 +923,7 @@ def test_liffile(filetype):
         assert im.name == 'XYZT'
         assert im.path == 'XYZT'
         assert im.index == 5
-        assert im.guid == '06f46831-5b37-11e3-8f53-eccd6d2154b5'
+        assert im.uuid == '06f46831-5b37-11e3-8f53-eccd6d2154b5'
         assert len(im.xml_element) > 0
         assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
@@ -940,10 +943,6 @@ def test_liffile(filetype):
         assert im.nbytes == 1146880
         assert im.ndim == 5
         assert isinstance(im.xml_element, ElementTree.Element)
-
-        with pytest.raises(NotImplementedError):
-            for frame in im.frames():
-                pass
 
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS-AF [ BETA ] 3.3.0.10067'
@@ -1021,7 +1020,7 @@ def test_lof():
         assert im.name == 'XYCST'
         assert im.path == 'XYCST'
         assert im.index == 0
-        assert im.guid == '7949fec1-59bf-11ec-9875-a4bb6dd99fac'
+        assert im.uuid == '7949fec1-59bf-11ec-9875-a4bb6dd99fac'
         assert len(im.xml_element) > 0
         assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
@@ -1040,10 +1039,6 @@ def test_lof():
         assert im.nbytes == 46080000
         assert im.ndim == 5
         assert isinstance(im.xml_element, ElementTree.Element)
-
-        with pytest.raises(NotImplementedError):
-            for frame in im.frames():
-                pass
 
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS X [ BETA ] 5.0.3.24880'
@@ -1104,8 +1099,34 @@ def test_flim():
     """Test read FLIM dataset."""
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
     with LifFile(filename) as lif:
-        # flim = lif.flim_rawdata
-        # assert flim['LaserPulseFrequency'] == 19505000
+        str(lif)
+
+        for image in lif.series:
+            str(image)
+
+        flim = lif.series['FLIM Compressed']
+        assert isinstance(flim, LifFlimImage)
+        assert lif.uuid == 'd9f87ad9-b958-11ed-bb27-00506220277a'
+        assert flim.is_flim
+        assert flim.xml_element_smd == flim.xml_element
+        assert flim.dtype == numpy.uint16
+        assert flim.sizes == {'Y': 1024, 'X': 1024, 'H': 528}
+        assert pytest.approx(flim.coords['X'][-1]) == 0.0005563808000453999
+        assert pytest.approx(flim.coords['Y'][-1]) == 0.0005563808000453999
+        assert pytest.approx(flim.coords['H'][-1]) == 5.110303030319e-08
+        assert flim.attrs['path'].endswith('/FLIM Compressed')
+        assert flim.attrs['RawData']['LaserPulseFrequency'] == 19505000
+        assert flim.global_resolution == 5.126890540886952e-08
+        assert flim.tcspc_resolution == 9.696969697e-11
+        assert flim.number_bins_in_period == 528
+        assert flim.pixel_time == 7.6875e-06
+        assert flim.frequency == 19.505
+        assert not flim.is_bidirectional
+        assert not flim.is_sinusoidal
+        assert len(flim.timestamps) == 0
+        assert len(flim.memory_block.read(lif.filehandle)) == 15502568
+        with pytest.raises(NotImplementedError):
+            flim.asxarray()
 
         intensity = lif.series['/Intensity']
         assert intensity.xml_element_smd is not None
@@ -1142,6 +1163,50 @@ def test_flim():
         assert data.dtype == numpy.uint32
         gamma = data.attrs['ViewerScaling']['ChannelScalingInfo']['GammaValue']
         assert gamma == 1.0
+
+
+def test_flim_flim():
+    """Test LOF file with FLIM image."""
+    filename = (
+        DATA
+        / 'XLEFReaderForBioformats/falcon_sample_data_small'
+        / 'XLEF-LOF falcon_sample_data_small/Series003'
+        / 'FLIM Compressed.lof'
+    )
+    with LifFile(filename) as lof:
+        str(lof)
+        assert lof.is_lof
+        assert lof.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
+        assert len(lof.series) == 1
+        memblock = lof.memory_blocks['MemBlock_1643']
+        assert len(memblock.read(lof.filehandle)) == memblock.size
+
+        for image in lof.series:
+            str(image)
+
+        flim = lof.series['FLIM Compressed']
+        assert isinstance(flim, LifFlimImage)
+        assert flim.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
+        assert flim.is_flim
+        assert flim.xml_element_smd == flim.xml_element
+        assert flim.dtype == numpy.uint16
+        assert flim.sizes == {'C': 2, 'Y': 512, 'X': 512, 'H': 132}
+        assert pytest.approx(flim.coords['X'][-1]) == 0.0011624999998359998
+        assert pytest.approx(flim.coords['Y'][-1]) == 0.0011624999998359998
+        assert pytest.approx(flim.coords['H'][-1]) == 1.270303030307e-08
+        assert flim.attrs['path'].endswith('/FLIM Compressed')
+        assert flim.attrs['RawData']['LaserPulseFrequency'] == 78020000
+        assert flim.global_resolution == 1.281722635221738e-08
+        assert flim.tcspc_resolution == 9.696969697e-11
+        assert flim.number_bins_in_period == 132
+        assert flim.pixel_time == 3.1625e-06
+        assert flim.frequency == 78.02
+        assert not flim.is_bidirectional
+        assert not flim.is_sinusoidal
+        assert len(flim.timestamps) == 0
+        assert len(flim.memory_block.read(lof.filehandle)) == 1538370
+        with pytest.raises(NotImplementedError):
+            flim.asxarray()
 
 
 def test_rgb():
@@ -1206,19 +1271,13 @@ def test_output(output, asxarray):
 
 def test_lof_no_image():
     """Test LOF file with no image."""
-    path = (
+    filename = (
         DATA
         / 'XLEFReaderForBioformats/falcon_sample_data_small'
         / 'XLEF-LOF falcon_sample_data_small/Series003'
+        / 'FrameProperties.lof'
     )
-    with LifFile(path / 'FLIM Compressed.lof') as lof:
-        str(lof)
-        assert lof.is_lof
-        assert len(lof.series) == 0
-        memblock = lof.memory_blocks['MemBlock_1643']
-        assert len(memblock.read(lof.filehandle)) == memblock.size
-
-    with LifFile(path / 'FrameProperties.lof') as lof:
+    with LifFile(filename) as lof:
         str(lof)
         assert lof.is_lof
         assert len(lof.series) == 0
@@ -1322,13 +1381,17 @@ def test_glob(fname):
     with LifFile(fname) as lif:
         str(lif)
         if lif.is_lof:
-            one = lif.name not in {'FrameProperties', 'FLIM Compressed', ''}
+            one = lif.name not in {'FrameProperties', ''}
             assert len(lif.series) == int(one)
         else:
             assert len(lif.series) > 0
         for image in lif.series:
             str(image)
-            image.asxarray()
+            if image.is_flim:
+                with pytest.raises(NotImplementedError):
+                    image.asxarray()
+            else:
+                image.asxarray()
             image.timestamps
             image.xml_element_smd
 
