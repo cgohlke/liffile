@@ -29,17 +29,17 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read Leica image file formats (LIF and LOF).
+"""Read Leica image files (LIF and LOF).
 
 Liffile is a Python library to read image and metadata from Leica image file
-formats: LIF (Leica Image Format) and LOF (Leica Object Format).
+formats: LIF (Leica Image File) and LOF (Leica Object File).
 
 These files are written by LAS X software to store collections of images
 and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.1.31
+:Version: 2025.2.2
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -69,6 +69,13 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.2.2
+
+- Add LifFlimImage class.
+- Derive LifImage and LifFlimImage from LifImageABC.
+- Rename LifImage.guid property to uuid (breaking).
+- Add LifFile.uuid property.
 
 2025.1.31
 
@@ -152,25 +159,29 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.1.31'
+__version__ = '2025.2.2'
 
 __all__ = [
     '__version__',
     'imread',
     'logger',
     'LifFile',
-    'LifImage',
-    'LifImageSeries',
     'LifFileError',
+    'LifImageABC',
+    'LifImage',
+    'LifFlimImage',
+    'LifImageSeries',
     'LifMemoryBlock',
     'FILE_EXTENSIONS',
 ]
 
 import logging
+import math
 import os
 import re
 import struct
 import sys
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -180,7 +191,7 @@ from typing import TYPE_CHECKING, final, overload
 from xml.etree import ElementTree
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Container, Iterable, Iterator
     from typing import IO, Any, Literal
 
     from numpy.typing import DTypeLike, NDArray
@@ -222,10 +233,10 @@ def imread(
     /,
     *,
     series: int | str = 0,
-    asrgb: bool = True,
     squeeze: bool = True,
     out: OutputType = None,
     asxarray: bool = False,
+    **kwargs: Any,
 ) -> NDArray[Any] | DataArray:
     """Return image from file.
 
@@ -237,9 +248,6 @@ def imread(
         series:
             Index or name of image to return.
             By default, the first image in the file is returned.
-        asrgb:
-            Return RGB samples in RGB order, not storage order.
-            If true, the returned array data might not be contiguous.
         squeeze:
             Remove dimensions of length one from images.
         out:
@@ -252,6 +260,8 @@ def imread(
             array in the specified file.
         asxarray:
             Return image data as xarray.DataArray instead of numpy.ndarray.
+        **kwargs:
+            Optional arguments to :py:meth:`LifImageABC.asarray`.
 
     Returns:
         :
@@ -262,9 +272,9 @@ def imread(
     with LifFile(file, squeeze=squeeze) as lif:
         image = lif.series[series]
         if asxarray:
-            data = image.asxarray(asrgb=asrgb, out=out)
+            data = image.asxarray(out=out, **kwargs)
         else:
-            data = image.asarray(asrgb=asrgb, out=out)
+            data = image.asarray(out=out, **kwargs)
     return data
 
 
@@ -305,6 +315,9 @@ class LifFile:
 
     name: str
     """Name of file from XML header."""
+
+    uuid: str | None
+    """Unique identifier of file, if any."""
 
     is_lof: bool
     """File has LOF format."""
@@ -350,6 +363,7 @@ class LifFile:
         self.is_lof = False
         self.version = 0
         self.name = ''
+        self.uuid = None
         self.memory_blocks = {}
         self._xml_header = (0, 0)
         # self.xml_element =
@@ -370,7 +384,7 @@ class LifFile:
         if id0 != 0x70 or id1 != 0x2A:  # or size != 2 * strlen + 5
             raise LifFileError(
                 'not a Leica image file '
-                f'{id0=:02X}, {size=}, {id1=:02X}, {strlen=}'
+                f'({id0=:02X} != 0x70 or {id1=:02X} != 0x2A)'
             )
         self._xml_header = (fh.tell(), strlen * 2)
         xml_header = fh.read(strlen * 2).decode('utf-16-le')
@@ -385,7 +399,8 @@ class LifFile:
                 raise LifFileError('corrupted Leica object file') from exc
             if id0 != 0x2A or id1 != 0x2A:
                 raise LifFileError(
-                    f'not a Leica object file {id0=:02X}, {id1=:02X}'
+                    'corrupted Leica object file '
+                    f'({id0=:02X} != 0x2A or {id1=:02X} != 0x2A)'
                 )
             memblock = LifMemoryBlock(fh, -1)
 
@@ -393,11 +408,12 @@ class LifFile:
             try:
                 id0, size, id1, xmlsize = struct.unpack('<IIBI', fh.read(13))
             except Exception as exc:
-                raise LifFileError('not a Leica object file') from exc
+                raise LifFileError('corrupted Leica object file') from exc
             if id0 != 0x70 or id1 != 0x2A or size != 2 * xmlsize + 5:
                 raise LifFileError(
-                    'not a Leica object file '
-                    f'{id0=:02X}, {size=}, {id1=:02X}, {xmlsize=}'
+                    'corrupted Leica object file '
+                    f'({id0=:02X} != 0x70, {id1=:02X} != 0x2A, or '
+                    f'{size=} != {2 * xmlsize + 5})'
                 )
             self._xml_header = (fh.tell(), xmlsize * 2)
             xml_header = fh.read(xmlsize * 2).decode('utf-16-le')
@@ -450,6 +466,7 @@ class LifFile:
             logger().warning(f'{self!r} no XML image element found')
         else:
             self.name = element.attrib.get('Name', self.name)
+            self.uuid = element.attrib.get('UniqueID')
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -505,18 +522,21 @@ class LifFile:
             repr(self),
             f'filename: {self.filename}',
             f'datetime: {self.datetime}',
-            *(repr(image) for image in self.series),
-            *(
-                repr(memblock)
-                for memblock in self.memory_blocks.values()
-                if memblock.size > 0
+            f'uuid: {self.uuid}',
+            indent('series:', *(repr(image) for image in self.series)),
+            indent(
+                'memory_blocks:',
+                *(
+                    repr(memblock)
+                    for memblock in self.memory_blocks.values()
+                    if memblock.size > 0
+                ),
             ),
         )
 
 
-@final
-class LifImage:
-    """Single image in LIF file.
+class LifImageABC(ABC):
+    """Base class for :py:class:`LifImage` and :py:class:`LifFlimImage`.
 
     All properties are read-only.
 
@@ -531,6 +551,7 @@ class LifImage:
     Notes:
         LIF images may have the following dimensions in almost any order:
 
+        - ``'H'``: TCSPC histogram
         - ``'S'``: Sample/color component
         - ``'C'``: Channel
         - ``'X'``: Width
@@ -573,21 +594,198 @@ class LifImage:
         self.index = index
 
     @property
+    def is_flim(self) -> bool:
+        """Image contains FLIM/TCSPC histogram."""
+        return isinstance(self, LifFlimImage)
+
+    @property
     def name(self) -> str:
         """Name of image."""
         return os.path.split(self.path)[-1]
 
     @property
-    def guid(self) -> str | None:
+    def uuid(self) -> str | None:
         """Unique identifier of image, if any."""
         return self.xml_element.attrib.get('UniqueID')
 
     @property
+    @abstractmethod
     def xml_element_smd(self) -> ElementTree.Element | None:
-        """Parent SingleMoleculeDetection XML element, if any."""
-        guid = self.guid
+        """SingleMoleculeDetection XML element, if any."""
+
+    @cached_property
+    @abstractmethod
+    def dtype(self) -> numpy.dtype[Any]:
+        """Numpy data type of image array."""
+
+    @cached_property
+    @abstractmethod
+    def sizes(self) -> dict[str, int]:
+        """Map dimension names to lengths."""
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape of image."""
+        return tuple(self.sizes.values())
+
+    @property
+    def dims(self) -> tuple[str, ...]:
+        """Character codes of dimensions in image."""
+        return tuple(self.sizes.keys())
+
+    @property
+    def ndim(self) -> int:
+        """Number of image dimensions."""
+        return len(self.sizes)
+
+    @property
+    def nbytes(self) -> int:
+        """Number of bytes consumed by image."""
+        size = 1
+        for i in self.sizes.values():
+            size *= int(i)
+        return size * self.dtype.itemsize
+
+    @property
+    def size(self) -> int:
+        """Number of elements in image."""
+        size = 1
+        for i in self.sizes.values():
+            size *= int(i)
+        return size
+
+    @property
+    def itemsize(self) -> int:
+        """Length of one array element in bytes."""
+        return self.dtype.itemsize
+
+    @cached_property
+    @abstractmethod
+    def coords(self) -> dict[str, NDArray[Any]]:
+        """Mapping of image dimension names to coordinate variables."""
+
+    @cached_property
+    @abstractmethod
+    def attrs(self) -> dict[str, Any]:
+        """Image metadata from XML elements."""
+
+    @cached_property
+    def memory_block(self) -> LifMemoryBlock:
+        """Memory block containing image data."""
+        if self.parent.is_lof:
+            # LOF files contain one memory block
+            return self.parent.memory_blocks[
+                tuple(self.parent.memory_blocks.keys())[0]
+            ]
+        memory = self.xml_element.find('./Memory')
+        if memory is None:
+            raise IndexError('Memory element not found in XML')
+        mbid = memory.get('MemoryBlockID')
+        if mbid is None:
+            raise IndexError('MemoryBlockID attribute not found in XML')
+        return self.parent.memory_blocks[mbid]
+
+    @property
+    def timestamps(self) -> NDArray[numpy.datetime64]:
+        """Return time stamps of frames from TimeStampList XML element."""
+        return numpy.asarray([], dtype=numpy.datetime64)
+
+    # @abstractmethod
+    # def frames(self) -> Iterator[NDArray[Any]]:
+    #     """Return iterator over frames in image."""
+
+    @abstractmethod
+    def asarray(
+        self,
+        *,
+        out: OutputType = None,
+    ) -> NDArray[Any]:
+        """Return image data as array.
+
+        Dimensions are returned in order stored in file.
+
+        Parameters:
+            out:
+                Specifies where to copy image data.
+                If ``None``, create a new NumPy array in main memory.
+                If ``'memmap'``, directly memory-map the image data in the
+                file if possible; else create a memory-mapped array in a
+                temporary file.
+                If a ``numpy.ndarray``, a writable, initialized array
+                of :py:attr:`shape` and :py:attr:`dtype`.
+                If a ``file name`` or ``open file``, create a
+                memory-mapped array in the specified file.
+            **kwargs:
+                Optional arguments.
+
+        Returns:
+            :
+                Image data as numpy array.
+
+        """
+
+    def asxarray(self, **kwargs: Any) -> DataArray:
+        """Return image data as xarray.
+
+        Dimensions are returned in order stored in file.
+
+        Parameters:
+            **kwargs: Optional arguments to :py:meth:`asarray`.
+
+        Returns:
+            :
+                Image data and select metadata as xarray DataArray.
+
+        """
+        from xarray import DataArray
+
+        return DataArray(
+            self.asarray(**kwargs),
+            coords=self.coords,
+            dims=self.dims,
+            name=self.name,
+            attrs=self.attrs,
+        )
+
+    def __repr__(self) -> str:
+        # TODO: make columns configurable?
+        # such that it can be set to os.get_terminal_size().columns
+        columns = 115
+        name = self.__class__.__name__
+        index = self.index
+        path = self.path
+        dtype = self.dtype
+        sizes = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
+        r = f'<{name} {index} {path!r} ({sizes}) {dtype}>'
+        if len(r) > columns + 2:
+            path = '… ' + self.path[len(r) - columns :]
+            r = f'<{name} {index} {path!r} ({sizes}) {dtype}>'
+        return r
+
+    def __str__(self) -> str:
+        return indent(
+            repr(self),
+            *(
+                f'{name}: {getattr(self, name)!r}'[:160]
+                for name in dir(self)
+                if not (name.startswith('_') or callable(getattr(self, name)))
+            ),
+        )
+
+
+@final
+class LifImage(LifImageABC):
+    """Regular image.
+
+    Defined by XML Element with Data/Image child.
+
+    """
+
+    @property
+    def xml_element_smd(self) -> ElementTree.Element | None:
+        uuid = self.uuid
         return self.parent.xml_element.find(
-            f'.//Element[@UniqueID="{guid}"]../../Data/SingleMoleculeDetection'
+            f'.//Element[@UniqueID="{uuid}"]../../Data/SingleMoleculeDetection'
         )
 
     @cached_property
@@ -675,12 +873,6 @@ class LifImage:
 
     @cached_property
     def dtype(self) -> numpy.dtype[Any]:
-        """Numpy data type of image array.
-
-        Raises:
-            ValueError: channel data types are heterogeneous.
-
-        """
         channels = self._channels
         dtype = channels[0].dtype
 
@@ -694,7 +886,6 @@ class LifImage:
 
     @cached_property
     def sizes(self) -> dict[str, int]:
-        """Map dimension names to lengths."""
         squeeze = self.parent._squeeze
         channels = self._channels
         nchannels = len(channels)
@@ -730,45 +921,8 @@ class LifImage:
 
         return dict(reversed(list(sizes.items())))
 
-    @property
-    def shape(self) -> tuple[int, ...]:
-        """Shape of image."""
-        return tuple(self.sizes.values())
-
-    @property
-    def dims(self) -> tuple[str, ...]:
-        """Character codes of dimensions in image."""
-        return tuple(self.sizes.keys())
-
-    @property
-    def ndim(self) -> int:
-        """Number of image dimensions."""
-        return len(self.sizes)
-
-    @property
-    def nbytes(self) -> int:
-        """Number of bytes consumed by image."""
-        size = 1
-        for i in self.sizes.values():
-            size *= int(i)
-        return size * self.dtype.itemsize
-
-    @property
-    def size(self) -> int:
-        """Number of elements in image."""
-        size = 1
-        for i in self.sizes.values():
-            size *= int(i)
-        return size
-
-    @property
-    def itemsize(self) -> int:
-        """Length of one array element in bytes."""
-        return self.dtype.itemsize
-
     @cached_property
     def coords(self) -> dict[str, NDArray[Any]]:
-        """Mapping of image dimension names to coordinate variables."""
         # TODO: add channel names. Channels may be in several dimensions
         squeeze = self.parent._squeeze
         coords = {}
@@ -787,7 +941,6 @@ class LifImage:
 
     @cached_property
     def attrs(self) -> dict[str, Any]:
-        """Image metadata from Attachment XML elements."""
         if self.parent.is_lof:
             path = self.path
         else:
@@ -799,25 +952,8 @@ class LifImage:
         )
         return attrs
 
-    @cached_property
-    def memory_block(self) -> LifMemoryBlock:
-        """Memory block containing image data."""
-        if self.parent.is_lof:
-            # LOF files contain one memory block
-            return self.parent.memory_blocks[
-                tuple(self.parent.memory_blocks.keys())[0]
-            ]
-        memory = self.xml_element.find('./Memory')
-        if memory is None:
-            raise IndexError('Memory element not found in XML')
-        mbid = memory.get('MemoryBlockID')
-        if mbid is None:
-            raise IndexError('MemoryBlockID attribute not found in XML')
-        return self.parent.memory_blocks[mbid]
-
     @property
     def timestamps(self) -> NDArray[numpy.datetime64]:
-        """Return time stamps of frames from TimeStampList XML element."""
         timestamp = self.xml_element.find('./Data/Image/TimeStampList')
         if timestamp is None:
             return numpy.asarray([], dtype=numpy.datetime64)
@@ -825,16 +961,14 @@ class LifImage:
         if timestamp.find('./TimeStamp') is not None:
             # LAS < 3.1
             text = ElementTree.tostring(timestamp).decode()
+            high_integers = ' '.join(re.findall(r'HighInteger="(\d+)"', text))
+            low_integers = ' '.join(re.findall(r'LowInteger="(\d+)"', text))
             timestamps = numpy.fromstring(
-                ' '.join(re.findall(r'HighInteger="(\d+)"', text)),
-                dtype=numpy.uint64,
-                sep=' ',
+                high_integers, dtype=numpy.uint64, sep=' '
             )
             timestamps <<= 32
             timestamps += numpy.fromstring(
-                ' '.join(re.findall(r'LowInteger="(\d+)"', text)),
-                dtype=numpy.uint32,
-                sep=' ',
+                low_integers, dtype=numpy.uint32, sep=' '
             )
         elif timestamp.text is not None:
             # LAS >= 3.1
@@ -850,10 +984,6 @@ class LifImage:
         return timestamps.astype(  # type: ignore[no-any-return]
             'datetime64[ms]'
         )
-
-    def frames(self) -> Iterator[NDArray[Any]]:
-        """Return iterator over all frames in image."""
-        raise NotImplementedError
 
     def asarray(
         self,
@@ -900,28 +1030,148 @@ class LifImage:
             data = data[..., ::-1]
         return data
 
-    def asxarray(
+
+@final
+class LifFlimImage(LifImageABC):
+    """FLIM/TCSPC histogram image.
+
+    Defined by XML Element with Data/SingleMoleculeDetection child.
+
+    """
+
+    @property
+    def xml_element_smd(self) -> ElementTree.Element | None:
+        return self.xml_element
+
+    @cached_property
+    def dtype(self) -> numpy.dtype[Any]:
+        return numpy.dtype(numpy.uint16)
+
+    @cached_property
+    def sizes(self) -> dict[str, int]:
+        sizes = {'H': self.number_bins_in_period}
+
+        dims = self.xml_element.find(
+            './Data/SingleMoleculeDetection/Dataset/RawData/Dimensions'
+        )
+        if dims is None:
+            raise ValueError('Dimensions element not found in XML')
+
+        for dimid, size in zip(
+            dims.findall('Dimension/DimensionIdentifier'),
+            dims.findall('Dimension/Size'),
+        ):
+            if dimid.text is None or size.text is None or int(size.text) <= 1:
+                continue
+            name = {'M': 'A', 'S': 'M'}.get(dimid.text, dimid.text)
+            sizes[name] = int(size.text)
+
+        return dict(reversed(list(sizes.items())))
+
+    @cached_property
+    def coords(self) -> dict[str, NDArray[Any]]:
+        attrs = self.attrs['RawData']
+        sizes = self.sizes
+        coords = {}
+        for ax in 'ZYX':
+            if ax in sizes:
+                coords[ax] = numpy.linspace(
+                    0.0,
+                    attrs['VoxelSize' + ax] * sizes[ax],
+                    sizes[ax],
+                    endpoint=False,
+                )
+        if 'H' in sizes:
+            coords['H'] = numpy.linspace(
+                0,
+                self.number_bins_in_period * attrs['ClockPeriod'],
+                self.number_bins_in_period,
+                endpoint=False,
+            )
+        return coords
+
+    @cached_property
+    def attrs(self) -> dict[str, Any]:
+        rawdata = self.xml_element.find(
+            './Data/SingleMoleculeDetection/Dataset/RawData'
+        )
+        if rawdata is None:
+            raise ValueError('RawData element not found in XML')
+        attrs = xml2dict(rawdata, exclude={'Dimensions', 'Channels'})
+        return {
+            'path': self.parent.name + '/' + self.path,
+            'RawData': attrs['RawData'],
+        }
+
+    @property
+    def global_resolution(self) -> float:
+        """Resolution of time tags in s."""
+        return float(1.0 / self.attrs['RawData']['LaserPulseFrequency'])
+
+    @property
+    def tcspc_resolution(self) -> float:
+        """Resolution of TCSPC in s."""
+        return float(self.attrs['RawData']['ClockPeriod'])
+
+    @property
+    def number_bins_in_period(self) -> int:
+        """Delay time in one period."""
+        attrs = self.attrs['RawData']
+        frequency = attrs['LaserPulseFrequency']
+        clock_period = attrs['ClockPeriod']
+        return max(1, int(math.floor(1.0 / frequency / clock_period)))
+
+    @property
+    def pixel_time(self) -> float:
+        """Time per pixel in s."""
+        return float(self.attrs['RawData']['PixelTime'])
+
+    @property
+    def frequency(self) -> float:
+        """Repetition frequency in MHz."""
+        return float(1e-6 * self.attrs['RawData']['LaserPulseFrequency'])
+
+    @property
+    def is_bidirectional(self) -> bool:
+        """Bidirectional scan mode."""
+        return bool(self.attrs['RawData']['BiDirectional'])
+
+    @property
+    def is_sinusoidal(self) -> bool:
+        """Sinusoidal scan mode."""
+        return bool(self.attrs['RawData']['SinusCorrection'])
+
+    def asarray(
         self,
         *,
-        asrgb: bool = True,
-        mode: str = 'r',
+        dtype: DTypeLike | None = None,
+        frame: int | None = None,
+        channel: int | None = None,
+        dtime: int | None = None,
         out: OutputType = None,
-    ) -> DataArray:
-        """Return image data as xarray.
+    ) -> NDArray[Any]:
+        """Return image data as array.
 
         Dimensions are returned in order stored in file.
 
         Parameters:
-            asrgb:
-                Return RGB samples in RGB order, not storage order.
-                If true, the returned array might not be contiguous.
-            mode:
-                Memmap file open mode. The default is read-only.
+            dtype:
+                Unsigned integer type of image histogram array.
+                The default is ``uint16``. Increase the bit depth to avoid
+                overflows when integrating.
+            frame:
+                If < 0, integrate time axis, else return specified frame.
+            channel:
+                If < 0, integrate channel axis, else return specified channel.
+            dtime:
+                Specifies number of bins in image histogram.
+                If 0, return :py:attr:`number_bins_in_period` bins.
+                If < 0, integrate delay time axis.
+                If > 0, return up to specified bin.
             out:
                 Specifies where to copy image data.
                 If ``None``, create a new NumPy array in main memory.
-                If ``'memmap'``, directly memory-map the image data in the
-                file if possible; else create a memory-mapped array in a
+                If ``'memmap'``, create a memory-mapped array in a
                 temporary file.
                 If a ``numpy.ndarray``, a writable, initialized array
                 of :py:attr:`shape` and :py:attr:`dtype`.
@@ -930,57 +1180,35 @@ class LifImage:
 
         Returns:
             :
-                Image data and select metadata as xarray DataArray.
+                Image data as numpy array.
 
         """
-        from xarray import DataArray
-
-        return DataArray(
-            self.asarray(asrgb=asrgb, mode=mode, out=out),
-            coords=self.coords,
-            dims=self.dims,
-            name=self.name,
-            attrs=self.attrs,
-        )
-
-    def __repr__(self) -> str:
-        # TODO: make columns configurable?
-        # such that it can be set to os.get_terminal_size().columns
-        columns = 115
-        name = self.__class__.__name__
-        index = self.index
-        path = self.path
-        dtype = self.dtype
-        sizes = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
-        r = f'<{name} {index} {path!r} ({sizes}) {dtype}>'
-        if len(r) > columns + 2:
-            path = '… ' + self.path[len(r) - columns :]
-            r = f'<{name} {index} {path!r} ({sizes}) {dtype}>'
-        return r
-
-    def __str__(self) -> str:
-        return indent(repr(self))
+        format = self.attrs['RawData']['Format']
+        raise NotImplementedError(f'{format=!r} is patent-pending')
 
 
 @final
-class LifImageSeries(Sequence[LifImage]):
+class LifImageSeries(Sequence[LifImageABC]):
     """Sequence of images in LIF file."""
 
     __slots__ = ('_parent', '_images')
 
     _parent: LifFile
-    _images: dict[str, LifImage]
+    _images: dict[str, LifImageABC]
 
     def __init__(self, parent: LifFile) -> None:
         self._parent = parent
-        self._images = {
-            path.split('/', 1)[-1]: LifImage(
-                parent, image, path.split('/', 1)[-1], index
-            )
-            for index, (path, image) in enumerate(
-                LifImageSeries._image_iter(parent.xml_element)
-            )
-        }
+        self._images = {}
+        for index, (path, element) in enumerate(
+            LifImageSeries._image_iter(parent.xml_element)
+        ):
+            image: LifImageABC
+            path = path.split('/', 1)[-1]
+            if element.find('./Data/SingleMoleculeDetection') is None:
+                image = LifImage(parent, element, path, index)
+            else:
+                image = LifFlimImage(parent, element, path, index)
+            self._images[path] = image
 
     @staticmethod
     def _image_iter(
@@ -1001,18 +1229,20 @@ class LifImageSeries(Sequence[LifImage]):
             image = element.find('./Data/Image')
             if image is not None:
                 yield path, element
-            # else:
-            #     # FLIM/TCSPC
-            #     image = element.find('./Data/SingleMoleculeDetection')
-            #     if image is not None:
-            #         yield path, image
+            else:
+                # FLIM/TCSPC
+                image = element.find(
+                    './Data/SingleMoleculeDetection[@IsImage="true"]'
+                )
+                if image is not None:
+                    yield path, element
             if element.find('./Children/Element/Data') is not None:
                 # sub images
                 yield from LifImageSeries._image_iter(element, path)
 
     def findall(
         self, key: str, /, *, flags: int = re.IGNORECASE
-    ) -> tuple[LifImage, ...]:
+    ) -> tuple[LifImageABC, ...]:
         """Return all images with matching path pattern.
 
         Parameters:
@@ -1037,7 +1267,7 @@ class LifImageSeries(Sequence[LifImage]):
         self,
         key: int | str,
         /,
-    ) -> LifImage:
+    ) -> LifImageABC:
         """Return image at index or first image with matching path."""
         if isinstance(key, int):
             return self._images[tuple(self._images.keys())[key]]
@@ -1052,7 +1282,7 @@ class LifImageSeries(Sequence[LifImage]):
     def __len__(self) -> int:
         return len(self._images)
 
-    def __iter__(self) -> Iterator[LifImage]:
+    def __iter__(self) -> Iterator[LifImageABC]:
         return iter(self._images.values())
 
     def __repr__(self) -> str:
@@ -1111,12 +1341,15 @@ class LifMemoryBlock:
             self.id = 'MemBlock_0'  # updated in LifFile._init
             id0, self.size = struct.unpack(fmtstr, buffer)
             if id0 != 0x2A:
-                raise LifFileError(f'memory block {id0=} corrupted')
+                raise LifFileError(
+                    f'corrupted LOF memory block ({id0=:02X} != 0x2A)'
+                )
         else:
             id0, _, id1, size1, id2, strlen = struct.unpack(fmtstr, buffer)
             if id0 != 0x70 or id1 != 0x2A or id2 != 0x2A:
                 raise LifFileError(
-                    f'memory block {id0=}, {id1=}, {id2=} corrupted'
+                    f'corrupted LIF memory block ({id0=:02X} != 0x70, '
+                    f'{id1=:02X} != 0x2A, or {id2=:02X} != 0x2A)'
                 )
 
             buffer = fh.read(strlen * 2)
@@ -1271,6 +1504,32 @@ class LifDimension:
     """Bit distance."""
 
 
+@dataclass
+class LifRawData:
+    """Attributes of SingleMoleculeDetection/Dataset/RawData XML element."""
+
+    format: str
+    """Raw data dormat."""
+    voxel_size_x: float
+    """Spatial dimension size in m."""
+    voxel_size_y: float
+    """Spatial dimension size in m."""
+    voxel_size_z: float
+    """Spatial dimension size in m."""
+    clock_period: float
+    """Base clock in s."""
+    syncronization_marker_period: float
+    """Clock period of the FCS counter in s."""
+    frame_repetitions_marked: bool
+    """Frames completed when number photons detected."""
+    pixel_time: str
+    """Pixel dwell time in s."""
+    bi_directional: bool
+    """Bi-directional scan."""
+    sequential_mode: bool
+    """Look Up Table is inverted."""
+
+
 DIMENSION_ID = {
     # 0: 'C',  # sample, channel
     1: 'X',
@@ -1328,14 +1587,27 @@ def create_output(
     return numpy.memmap(out, shape=shape, dtype=dtype, mode='w+')
 
 
-def xml2dict(xml_element: ElementTree.Element, /) -> dict[str, Any]:
+def xml2dict(
+    xml_element: ElementTree.Element,
+    /,
+    *,
+    sanitize: bool = True,
+    prefix: tuple[str, str] | None = None,
+    exclude: Container[str] | None = None,
+    sep: str = ',',
+) -> dict[str, Any]:
     """Return XML as dictionary.
 
     Parameters:
-        xml: XML element to convert.
+        xml: XML data to convert.
+        sanitize: Remove prefix from from etree Element.
+        prefix: Prefixes for dictionary keys.
+        exclude: Ignore element tags.
+        sep: Sequence separator.
 
     """
-    sep = ','
+    at, tx = prefix if prefix else ('', '')
+    exclude = set() if exclude is None else exclude
 
     def astype(value: Any, /) -> Any:
         # return string value as int, float, bool, tuple, or unchanged
@@ -1350,22 +1622,28 @@ def xml2dict(xml_element: ElementTree.Element, /) -> dict[str, Any]:
                     return value
                 values.append(v)
             return tuple(values)
-        for t in (int, float):
+        for t in (int, float, asbool):
             try:
                 return t(value)
             except (TypeError, ValueError):
                 pass
         return value
 
-    def etree2dict(t: ElementTree.Element, /) -> dict[str, Any]:
+    def etree2dict(t: ElementTree.Element, /) -> dict[str, Any] | None:
+        # adapted from https://stackoverflow.com/a/10077069/453463
         key = t.tag
+        if sanitize:
+            key = key.rsplit('}', 1)[-1]
+        if key in exclude:
+            return None
         d: dict[str, Any] = {key: {} if t.attrib else None}
         children = list(t)
         if children:
             dd = defaultdict(list)
             for dc in map(etree2dict, children):
-                for k, v in dc.items():
-                    dd[k].append(astype(v))
+                if dc is not None:
+                    for k, v in dc.items():
+                        dd[k].append(astype(v))
             d = {
                 key: {
                     k: astype(v[0]) if len(v) == 1 else astype(v)
@@ -1373,17 +1651,44 @@ def xml2dict(xml_element: ElementTree.Element, /) -> dict[str, Any]:
                 }
             }
         if t.attrib:
-            d[key].update((k, astype(v)) for k, v in t.attrib.items())
+            d[key].update((at + k, astype(v)) for k, v in t.attrib.items())
         if t.text:
             text = t.text.strip()
             if children or t.attrib:
                 if text:
-                    d[key]['value'] = astype(text)
+                    d[key][tx + 'value'] = astype(text)
             else:
                 d[key] = astype(text)
         return d
 
-    return etree2dict(xml_element)
+    result = etree2dict(xml_element)
+    return {} if result is None else result
+
+
+def asbool(
+    value: str,
+    /,
+    true: Sequence[str] | None = None,
+    false: Sequence[str] | None = None,
+) -> bool | bytes:
+    """Return string as bool if possible, else raise TypeError.
+
+    >>> asbool('ON', ['on'], ['off'])
+    True
+
+    """
+    value = value.strip().lower()
+    if true is None:
+        if value == 'true':
+            return True
+    elif value in true:
+        return True
+    if false is None:
+        if value == 'false':
+            return False
+    elif value in false:
+        return False
+    raise TypeError
 
 
 def indent(*args: Any) -> str:
@@ -1473,8 +1778,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(lif)
                 print()
                 if imshow is None:
-                    break
+                    continue
                 for i, image in enumerate(lif.series):
+                    if image.is_flim:
+                        continue
                     im: Any
                     if xarray is not None:
                         im = image.asxarray()
@@ -1484,6 +1791,8 @@ def main(argv: list[str] | None = None) -> int:
                         data = im
                     print(im)
                     print()
+                    if im.ndim < 2:
+                        continue
                     pm = 'RGB' if image.dims[-1] == 'S' else 'MINISBLACK'
                     try:
                         imshow(
