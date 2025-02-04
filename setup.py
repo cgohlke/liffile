@@ -104,7 +104,9 @@ setup(
     entry_points={'console_scripts': ['liffile = liffile.__main__:main']},
     python_requires='>=3.10',
     install_requires=['numpy'],
-    extras_require={'all': ['xarray', 'tifffile', 'matplotlib']},
+    extras_require={
+        'all': ['xarray', 'tifffile', 'imagecodecs', 'matplotlib']
+    },
     # ext_modules=ext_modules,
     zip_safe=False,
     platforms=['any'],
