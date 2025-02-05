@@ -29,17 +29,18 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read Leica image files (LIF and LOF).
+"""Read Leica image files (LIF, LOF, and XLIF).
 
 Liffile is a Python library to read image and metadata from Leica image file
-formats: LIF (Leica Image File) and LOF (Leica Object File).
+formats: LIF (Leica Image File), LOF (Leica Object File), and
+XLIF (XML Leica Image File).
 
 These files are written by LAS X software to store collections of images
 and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.2
+:Version: 2025.2.5
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -61,14 +62,23 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.8, 3.13.1 64-bit
+- `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.9, 3.13.2 64-bit
 - `NumPy <https://pypi.org/project/numpy>`_ 2.2.2
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2024.12.30
+  (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Xarray <https://pypi.org/project/xarray>`_ 2025.1.2 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.0 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.1.10 (optional)
 
 Revisions
 ---------
+
+2025.2.5
+
+- Support XLIF files.
+- Revise LifMemoryBlock (breaking).
+- Replace LifImage.is_lof property with format (breaking).
+- Require imagecodecs for decoding TIF, JPEG, PNG, and BMP frames.
 
 2025.2.2
 
@@ -159,7 +169,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.2.2'
+__version__ = '2025.2.5'
 
 __all__ = [
     '__version__',
@@ -167,6 +177,7 @@ __all__ = [
     'logger',
     'LifFile',
     'LifFileError',
+    'LifFileFormat',
     'LifImageABC',
     'LifImage',
     'LifFlimImage',
@@ -175,6 +186,7 @@ __all__ = [
     'FILE_EXTENSIONS',
 ]
 
+import enum
 import logging
 import math
 import os
@@ -183,11 +195,12 @@ import struct
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cached_property
 from typing import TYPE_CHECKING, final, overload
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 if TYPE_CHECKING:
@@ -200,6 +213,11 @@ if TYPE_CHECKING:
     OutputType = str | IO[bytes] | NDArray[Any] | None
 
 import numpy
+
+try:
+    import imagecodecs
+except ImportError:
+    imagecodecs = None  # type: ignore[assignment]
 
 
 @overload
@@ -282,9 +300,34 @@ class LifFileError(Exception):
     """Exception to indicate invalid Leica Image File structure."""
 
 
+class LifFileFormat(enum.Enum):
+    """Leica file format."""
+
+    LIF = 'LIF'
+    """Leica image file."""
+
+    LOF = 'LOF'
+    """Leica object file."""
+
+    XLIF = 'XLIF'
+    """XML file containing image metadata."""
+
+    XLEF = 'XLEF'
+    """XML file containing experiment metadata."""
+
+    XLLF = 'XLLF'
+    """XML file containing folder-view metadata."""
+
+    XLCF = 'XLCF'
+    """XML file containing collection metadata."""
+
+    LIFEXT = 'LIFEXT'
+    """File containing optional image data for LIF."""
+
+
 @final
 class LifFile:
-    """Leica Image File.
+    """Leica image file (LIF, LOF, or XLIF).
 
     ``LifFile`` instances are not thread-safe. All attributes are read-only.
 
@@ -319,8 +362,8 @@ class LifFile:
     uuid: str | None
     """Unique identifier of file, if any."""
 
-    is_lof: bool
-    """File has LOF format."""
+    format: LifFileFormat
+    """Format of Leica image file."""
 
     xml_element: ElementTree.Element
     """XML header root element."""
@@ -360,7 +403,7 @@ class LifFile:
             raise ValueError(f'cannot open file of type {type(file)}')
 
         self._squeeze = bool(squeeze)
-        self.is_lof = False
+        self.format = LifFileFormat.LIF
         self.version = 0
         self.name = ''
         self.uuid = None
@@ -369,29 +412,39 @@ class LifFile:
         # self.xml_element =
 
         try:
-            self._init(self._fh)
+            self._init()
         except Exception:
             self.close()
             raise
 
-    def _init(self, fh: IO[bytes], /) -> None:
+    def _init(self) -> None:
         """Initialize from open file."""
+        fh = self._fh
         # read binary header
         try:
             id0, size, id1, strlen = struct.unpack('<IIBI', fh.read(13))
         except Exception as exc:
             raise LifFileError('not a Leica image file') from exc
-        if id0 != 0x70 or id1 != 0x2A:  # or size != 2 * strlen + 5
+
+        if id0 in {0x6D783F3C, 0x3CBFBBEF}:  # <?
+            self.format = LifFileFormat.XLIF
+            self._xml_header = (0, -1)
+            fh.seek(0)
+            xml_header = fh.read().decode()
+
+        elif id0 == 0x70 and id1 == 0x2A:  # or size != 2 * strlen + 5
+            self.format = LifFileFormat.LIF
+            self._xml_header = (fh.tell(), strlen * 2)
+            xml_header = fh.read(strlen * 2).decode('utf-16-le')
+
+        else:
             raise LifFileError(
                 'not a Leica image file '
                 f'({id0=:02X} != 0x70 or {id1=:02X} != 0x2A)'
             )
-        self._xml_header = (fh.tell(), strlen * 2)
-        xml_header = fh.read(strlen * 2).decode('utf-16-le')
 
-        self.is_lof = xml_header == 'LMS_Object_File'
-
-        if self.is_lof:
+        if xml_header == 'LMS_Object_File':
+            self.format = LifFileFormat.LOF
             # read memory block
             try:
                 id0, ver0, id1, ver1 = struct.unpack('<BIBI', fh.read(10))
@@ -402,7 +455,7 @@ class LifFile:
                     'corrupted Leica object file '
                     f'({id0=:02X} != 0x2A or {id1=:02X} != 0x2A)'
                 )
-            memblock = LifMemoryBlock(fh, -1)
+            memblock = LifMemoryBlock(self)
 
             # read XML header
             try:
@@ -429,13 +482,13 @@ class LifFile:
         try:
             self.version = int(self.xml_element.attrib['Version'])
         except KeyError:
-            if not self.is_lof:
+            if not self.format == LifFileFormat.LOF:
                 raise KeyError(
                     "'Version' attribute not found in XML root element"
                 )
 
         # add memory blocks
-        if self.is_lof:
+        if self.format == LifFileFormat.LOF:
             # LOF files only contain a single memory block without id.
             # Any id would work.
             # However, try to preserve original id from XML metadata.
@@ -453,13 +506,21 @@ class LifFile:
 
             memblock.id = memblock_id  # LOF memory blocks don't have id
             self.memory_blocks[memblock.id] = memblock
-        else:
+
+        elif self.format == LifFileFormat.LIF:
             while True:
                 try:
-                    memblock = LifMemoryBlock(fh, self.version)
+                    memblock = LifMemoryBlock(self)
                 except OSError:
                     break
                 self.memory_blocks[memblock.id] = memblock
+
+        elif self.format == LifFileFormat.XLIF:
+            memblock = LifMemoryBlock(self)
+            self.memory_blocks[memblock.id] = memblock
+
+        else:
+            raise ValueError(f'unsupported format {self.format!r}')
 
         element = self.xml_element.find('./Element')
         if element is None:
@@ -492,7 +553,10 @@ class LifFile:
     def xml_header(self) -> str:
         """Return XML object description from file."""
         self._fh.seek(self._xml_header[0])
-        return self._fh.read(self._xml_header[1]).decode('utf-16-le')
+        xml = self._fh.read(self._xml_header[1])
+        if self._xml_header[1] == -1:
+            return xml.decode()
+        return xml.decode('utf-16-le')
 
     def close(self) -> None:
         """Close file handle and free resources."""
@@ -522,6 +586,7 @@ class LifFile:
             repr(self),
             f'filename: {self.filename}',
             f'datetime: {self.datetime}',
+            f'format: {self.format}',
             f'uuid: {self.uuid}',
             indent('series:', *(repr(image) for image in self.series)),
             indent(
@@ -672,8 +737,8 @@ class LifImageABC(ABC):
     @cached_property
     def memory_block(self) -> LifMemoryBlock:
         """Memory block containing image data."""
-        if self.parent.is_lof:
-            # LOF files contain one memory block
+        if self.parent.format in {LifFileFormat.LOF, LifFileFormat.XLIF}:
+            # XLIF and LOF files contain one memory block
             return self.parent.memory_blocks[
                 tuple(self.parent.memory_blocks.keys())[0]
             ]
@@ -941,10 +1006,9 @@ class LifImage(LifImageABC):
 
     @cached_property
     def attrs(self) -> dict[str, Any]:
-        if self.parent.is_lof:
-            path = self.path
-        else:
-            path = self.parent.name + '/' + self.path
+        path = self.path
+        if self.parent.format == LifFileFormat.LIF:
+            path = self.parent.name + '/' + path
         attrs = {'path': path}
         attrs.update(
             (attach.attrib['Name'], xml2dict(attach)['Attachment'])
@@ -1019,7 +1083,7 @@ class LifImage(LifImageABC):
 
         """
         data = self.memory_block.read_array(
-            self.parent.filehandle, self.shape, self.dtype, mode=mode, out=out
+            self.shape, self.dtype, mode=mode, out=out
         )
         if (
             asrgb
@@ -1270,14 +1334,18 @@ class LifImageSeries(Sequence[LifImageABC]):
     ) -> LifImageABC:
         """Return image at index or first image with matching path."""
         if isinstance(key, int):
-            return self._images[tuple(self._images.keys())[key]]
+            try:
+                key = tuple(self._images.keys())[key]
+            except IndexError:
+                raise IndexError(f'image index={key} out of range')
+            return self._images[key]
         if key in self._images:
             return self._images[key]
         pattern = re.compile(key, flags=re.IGNORECASE)
         for path, image in self._images.items():
             if pattern.search(path) is not None:
                 return image
-        raise KeyError(key)
+        raise IndexError(f'image {key!r} not found')
 
     def __len__(self) -> int:
         return len(self._images)
@@ -1299,12 +1367,14 @@ class LifMemoryBlock:
     """Object memory block.
 
     Parameters:
-        fh: File handle.
-        version: LIF file version.
+        parent: Underlying LIF file.
 
     """
 
-    __slots__ = ('id', 'offset', 'size')
+    __slots__ = ('parent', 'id', 'offset', 'size', 'frames')
+
+    parent: LifFile
+    """Underlying LIF file."""
 
     id: str
     """Identity of memory block."""
@@ -1315,31 +1385,54 @@ class LifMemoryBlock:
     size: int
     """Size of memory block in bytes."""
 
-    def __init__(
-        self,
-        fh: IO[bytes],
-        version: int,
-        /,
-    ):
-        if version == -1:
-            # LOF
+    frames: tuple[LifMemoryFrame, ...]
+    """Frames in memory block."""
+
+    def __init__(self, parent: LifFile, /) -> None:
+        self.parent = parent
+        self.id = ''
+        self.offset = 0
+        self.size = 0
+        self.frames = ()
+
+        if parent.format == LifFileFormat.XLIF:
+            memory = parent.xml_element.find('./Element/Memory')
+            if memory is None:
+                raise ValueError('Memory element not found in XML')
+            self.offset = -1
+            self.size = int(memory.attrib['Size'])
+            self.id = memory.get('MemoryBlockID', '')
+            blocks = memory.findall('./Frame')
+            if len(blocks) < 1:
+                blocks = memory.findall('./Block')
+            frames = []
+            for block in blocks:
+                file = block.attrib['File']
+                offset = int(block.attrib['Offset'])
+                size = int(block.attrib['Size'])
+                uuid = block.get('UUID', '')
+                frames.append(LifMemoryFrame(file, offset, size, uuid))
+            self.frames = tuple(frames)
+            return
+
+        if parent.format == LifFileFormat.LOF:
             fmtstr = '<BQ'
-        elif version == 1:
+        elif parent.version == 1:
             fmtstr = '<IIBIBI'
-        elif version == 2:
+        elif parent.version == 2:
             fmtstr = '<IIBQBI'
         else:
-            raise ValueError(f'invalid memory block {version=}')
+            raise ValueError(f'invalid memory block {parent.version=}')
 
+        fh = parent.filehandle
         size = struct.calcsize(fmtstr)
         buffer = fh.read(size)
         if len(buffer) != size:
             raise OSError
 
-        if version < 0:
-            # LOF
+        if parent.format == LifFileFormat.LOF:
             self.id = 'MemBlock_0'  # updated in LifFile._init
-            id0, self.size = struct.unpack(fmtstr, buffer)
+            id0, size = struct.unpack(fmtstr, buffer)
             if id0 != 0x2A:
                 raise LifFileError(
                     f'corrupted LOF memory block ({id0=:02X} != 0x2A)'
@@ -1356,25 +1449,63 @@ class LifMemoryBlock:
             if len(buffer) != strlen * 2:
                 raise OSError
             self.id = buffer.decode('utf-16-le')
-            self.size = size1
+            size = size1
 
-        self.offset = fh.tell()
-        fh.seek(self.offset + self.size)
-        if fh.tell() - self.offset != self.size:
+        offset = fh.tell()
+        fh.seek(size, 1)
+        if fh.tell() - offset != size:
             raise OSError
+        self.offset = offset
+        self.size = size
 
-    def read(self, fh: IO[bytes], /) -> bytes:
+    def read(self, /) -> bytes:
         """Return memory block from file."""
-        fh.seek(self.offset)
-        buffer = fh.read(self.size)
+        buffer: bytes | bytearray
+
+        if len(self.frames) > 0:
+            dirname = os.path.dirname(self.parent.filename)
+            buffer = bytearray(self.size)
+            for frame in self.frames:
+                im = frame.imread(os.path.join(dirname, frame.file))
+                buffer[frame.offset : frame.offset + frame.size] = im.tobytes()
+            return bytes(buffer)
+
+        self.parent.filehandle.seek(self.offset)
+        buffer = self.parent.filehandle.read(self.size)
         if len(buffer) != self.size:
             raise OSError(f'read {len(buffer)} bytes, expected {self.size}')
         return buffer
 
+    def readinto(self, buffer: NDArray[Any], /) -> None:
+        """Read memory block from file into contiguous ndarray."""
+        if not buffer.flags.c_contiguous:
+            raise ValueError('buffer must be contiguous')
+        if buffer.nbytes != self.size:
+            raise ValueError(f'{buffer.nbytes} != {self.size=}')
+        buffer = buffer.reshape(-1).view(numpy.uint8)
+
+        if self.parent.format == LifFileFormat.XLIF:
+            dirname = os.path.dirname(self.parent.filename)
+            for frame in self.frames:
+                im = frame.imread(os.path.join(dirname, frame.file))
+                im = im.reshape(-1).view(numpy.uint8)
+                buffer[frame.offset : frame.offset + frame.size] = im
+            return
+
+        fh = self.parent.filehandle
+        fh.seek(self.offset)
+        try:
+            nbytes = fh.readinto(buffer)  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            data = fh.read(self.size)
+            nbytes = len(data)
+            buffer[:] = numpy.frombuffer(data, numpy.uint8)
+
+        if nbytes != self.size:
+            raise OSError(f'read {nbytes} bytes, expected {self.size}')
+
     def read_array(
         self,
-        fh: IO[bytes],
-        /,
         shape: tuple[int, ...],
         dtype: DTypeLike,
         *,
@@ -1384,8 +1515,6 @@ class LifMemoryBlock:
         """Return NumPy array from file.
 
         Parameters:
-            fh:
-                Open file handle to read from.
             shape:
                 Shape of array to read.
             dtype:
@@ -1413,7 +1542,9 @@ class LifMemoryBlock:
         if nbytes != self.size:
             logger().warning(f'{self!r} != array size={nbytes}')
 
-        if isinstance(out, str) and out == 'memmap':
+        fh = self.parent.filehandle
+
+        if isinstance(out, str) and out == 'memmap' and self.offset > 0:
             return numpy.memmap(  # type: ignore[no-any-return]
                 fh,  # type: ignore[call-overload]
                 dtype=dtype,
@@ -1427,17 +1558,7 @@ class LifMemoryBlock:
         if data.nbytes != nbytes:
             raise ValueError('size mismatch')
 
-        fh.seek(self.offset)
-        try:
-            n = fh.readinto(data)  # type: ignore[attr-defined]
-        except (AttributeError, OSError):
-            data[:] = numpy.frombuffer(fh.read(nbytes), dtype).reshape(
-                data.shape
-            )
-            n = nbytes
-
-        if n != nbytes:
-            raise ValueError(f'failed to read {nbytes} bytes, got {n}')
+        self.readinto(data)
 
         if out is not None:
             if hasattr(out, 'flush'):
@@ -1446,9 +1567,71 @@ class LifMemoryBlock:
         return data
 
     def __repr__(self) -> str:
+        frames = f' frames={len(self.frames)}' if len(self.frames) > 0 else ''
         return (
             f'<{self.__class__.__name__} {self.id!r} '
-            f'offset={self.offset} size={self.size}>'
+            f'offset={self.offset} size={self.size}{frames}>'
+        )
+
+
+@final
+class LifMemoryFrame:
+    """Frame in object memory block."""
+
+    __slots__ = ('file', 'offset', 'size', 'uuid')
+
+    file: str
+    """File name."""
+
+    offset: int
+    """Byte offset of frame frame in memory block."""
+
+    size: int
+    """Size of frame in bytes."""
+
+    uuid: str
+    """Unique identifier of frame."""
+
+    def __init__(
+        self,
+        file: str,
+        offset: int,
+        size: int,
+        uuid: str,
+        /,
+    ) -> None:
+        self.file = os.path.normpath(unquote(file)).replace('\\', '/')
+        self.offset = int(offset)
+        self.size = int(size)
+        self.uuid = uuid
+
+    def imread(
+        self,
+        filename: str,
+        /,
+        **kwargs: Any,
+    ) -> NDArray[Any]:
+        """Return frame image from file."""
+        ext = os.path.splitext(filename)[1]
+        if ext not in IMREAD:
+            raise ValueError(f'unsupported file extension {ext!r}')
+        im = IMREAD[ext](filename, **kwargs)
+        if im.nbytes != self.size:
+            if (
+                im.ndim == 3
+                and im.shape[2] == 3
+                and im.nbytes // 3 == self.size
+            ):
+                # RGB -> grayscale
+                im = im[:, :, 0]
+            else:
+                raise ValueError(f'{self.size!r} != array size={im.nbytes}')
+        return im
+
+    def __repr__(self) -> str:
+        return (
+            f'<{self.__class__.__name__} {self.file!r} '
+            f'offset={self.offset} size={self.size} uiud={self.uuid!r}>'
         )
 
 
@@ -1530,6 +1713,50 @@ class LifRawData:
     """Look Up Table is inverted."""
 
 
+if imagecodecs is not None:
+
+    def imread_tif(filename: str, /, **kwargs: Any) -> NDArray[Any]:
+        with open(filename, 'rb') as fh:
+            data = fh.read()
+        return imagecodecs.tiff_decode(data, **kwargs)
+
+    def imread_jpg(filename: str, /, **kwargs: Any) -> NDArray[Any]:
+        with open(filename, 'rb') as fh:
+            data = fh.read()
+        return imagecodecs.jpeg8_decode(data, **kwargs)
+
+    def imread_png(filename: str, /, **kwargs: Any) -> NDArray[Any]:
+        with open(filename, 'rb') as fh:
+            data = fh.read()
+        return imagecodecs.png_decode(data, **kwargs)
+
+    def imread_bmp(filename: str, /, **kwargs: Any) -> NDArray[Any]:
+        with open(filename, 'rb') as fh:
+            data = fh.read()
+        return imagecodecs.bmp_decode(data, **kwargs)
+
+else:
+
+    def imread_fail(  # type: ignore[unreachable]
+        filename: str, /, **kwargs: Any
+    ) -> NDArray[Any]:
+        raise ImportError(
+            f'reading {os.path.splitext(filename)!r} '
+            "files requires the 'imagecodecs' package"
+        )
+
+    imread_tif = imread_jpg = imread_png = imread_bmp = imread_fail
+
+
+IMREAD: dict[str, Callable[..., NDArray[Any]]] = {
+    '.lof': imread,
+    '.tif': imread_tif,
+    '.jpg': imread_jpg,
+    '.png': imread_png,
+    '.bmp': imread_bmp,
+}
+"""Leica image file reader functions."""
+
 DIMENSION_ID = {
     # 0: 'C',  # sample, channel
     1: 'X',
@@ -1557,11 +1784,11 @@ CHANNEL_TAG = {
 FILE_EXTENSIONS = {
     '.lif': LifFile,
     '.lof': LifFile,
-    # '.xlif': XlifFile,
+    '.xlif': LifFile,
     # '.xlef': XlefFile,
     # '.xllf': XllfFile,
-    # '.lifext': LifextFile,
     # '.xlcf': XlcfFile,
+    # '.lifext': LifextFile,
 }
 """Supported file extensions of Leica image files."""
 
