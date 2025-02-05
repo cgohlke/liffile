@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.2.2
+:Version: 2025.2.5
 
 """
 
@@ -54,6 +54,7 @@ from liffile import (
     FILE_EXTENSIONS,
     LifFile,
     LifFileError,
+    LifFileFormat,
     LifFlimImage,
     LifImage,
     LifImageABC,
@@ -854,11 +855,13 @@ def test_version():
 
 
 def test_not_lif():
-    """Test open non-LIF file raises LifFileError."""
+    """Test open non-LIF file raises exceptions."""
     with pytest.raises(LifFileError):
         imread(DATA / 'empty.bin')
     with pytest.raises(LifFileError):
         imread(DATA / 'ScanModesExamples.lif.xml')
+    with pytest.raises(ValueError):
+        imread(ValueError)
 
 
 @pytest.mark.parametrize('asxarray', [False, True])
@@ -878,8 +881,8 @@ def test_imread(asxarray):
 
 
 @pytest.mark.parametrize('filetype', [str, io.BytesIO])
-def test_liffile(filetype):
-    """Test LifFile API."""
+def test_lif(filetype):
+    """Test LIF file."""
     filename = DATA / 'ScanModesExamples.lif'
     file = filename if filetype is str else open(filename, 'rb')
 
@@ -906,6 +909,8 @@ def test_liffile(filetype):
         str(series)
         assert isinstance(series, LifImageSeries)
         assert len(series) == 200
+        with pytest.raises(IndexError):
+            lif.series[200]
 
         for path, im in zip(series.paths(), series):
             assert im.path == path
@@ -948,8 +953,10 @@ def test_liffile(filetype):
         assert attrs['Software'] == 'LAS-AF [ BETA ] 3.3.0.10067'
         assert attrs['ATLConfocalSettingDefinition']['LineTime'] == 0.0025
 
-        data = im.asarray(asrgb=False, mode='r', out=None)
-        assert isinstance(data, numpy.ndarray)
+        data = im.asarray(asrgb=False, mode='r', out='memmap')
+        assert isinstance(data, numpy.memmap)
+        assert data.sum(dtype=numpy.uint64) == 27141756
+
         xdata = im.asxarray(asrgb=False, mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
@@ -966,7 +973,7 @@ def test_liffile(filetype):
         assert memory_block.id == 'MemBlock_29'
         assert memory_block.offset == 6639225
         assert memory_block.size == 1146880
-        assert memory_block.read(lif.filehandle) == data.tobytes()
+        assert memory_block.read() == data.tobytes()
 
     if filetype is not str:
         file.close()
@@ -987,7 +994,7 @@ def test_lof():
     )
 
     with LifFile(filename, mode='r', squeeze=True) as lof:
-        assert lof.is_lof
+        assert lof.format == LifFileFormat.LOF
         str(lof)
         assert lof.filename == str(filename)
         assert lof.name == 'XYCST'
@@ -1043,8 +1050,10 @@ def test_lof():
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS X [ BETA ] 5.0.3.24880'
 
-        data = im.asarray(asrgb=False, mode='r', out=None)
-        assert isinstance(data, numpy.ndarray)
+        data = im.asarray(asrgb=False, mode='r', out='memmap')
+        assert isinstance(data, numpy.memmap)
+        assert data.sum(dtype=numpy.uint64) == 1456570356
+
         xdata = im.asxarray(asrgb=False, mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
@@ -1061,7 +1070,143 @@ def test_lof():
         assert memory_block.id == 'MemBlock_1199'
         assert memory_block.offset == 62
         assert memory_block.size == 46080000
-        assert memory_block.read(lof.filehandle) == data.tobytes()
+        assert memory_block.read() == data.tobytes()
+
+
+@pytest.mark.parametrize(
+    'name',
+    [
+        # '16_18--Proj_LOF001',  # old-style LOF
+        '19_37--Proj_TIF_uncompressed001',
+        '20_09--Proj_TIF_lossless001',
+        '20_38--Proj_BMP001',
+        '21_19--Proj_JPEG_Quality_60%001',
+        '21_51--Proj_PNG001',
+    ],
+)
+def test_xlif(name):
+    """Test XLIF file."""
+    filename = (
+        DATA
+        / 'Leica_Image_File_Format Examples_2015_08'
+        / f'2015_03_16_14_{name}'
+        / 'Collection ZStack/Metadata'
+        / 'ImageXYZ10C2.xlif'
+    )
+
+    with LifFile(filename, mode='r', squeeze=True) as xlif:
+        assert xlif.format == LifFileFormat.XLIF
+        str(xlif)
+        assert xlif.filename == str(filename)
+        assert xlif.name == 'ImageXYZ10C2'
+        assert xlif.version == 2
+        assert isinstance(xlif.xml_element, ElementTree.Element)
+
+        assert xlif.xml_header().startswith('<?xml version="1.0"?>')
+
+        series = xlif.series
+        str(series)
+        assert isinstance(series, LifImageSeries)
+        assert len(series) == 1
+
+        for path, im in zip(series.paths(), series):
+            assert im.path == path
+            assert im.path == im.name
+            assert isinstance(im, LifImage)
+
+        images = series.findall('ImageXYZ10C2', flags=re.IGNORECASE)
+        assert len(images) == 1
+        assert images[0].name == 'ImageXYZ10C2'
+
+        im = series[0]
+        str(im)
+        assert series[im.path] is im
+        assert series[im.name + '$'] is im
+        assert im.parent == xlif
+        assert im.name == 'ImageXYZ10C2'
+        assert im.path == 'ImageXYZ10C2'
+        assert im.index == 0
+        # assert im.uuid == '2b165f65-cbdf-11e4-96dc-bc305be49d23'
+        assert len(im.xml_element) > 0
+        assert im.xml_element_smd is None
+        assert im.dtype == numpy.uint8
+        assert im.itemsize == 1
+        assert im.shape == (10, 2, 512, 512)
+        assert im.dims == ('Z', 'C', 'Y', 'X')
+        assert im.sizes == {'Z': 10, 'C': 2, 'Y': 512, 'X': 512}
+        assert 'C' not in im.coords
+        assert_allclose(
+            im.coords['Z'][[0, -1]], [-2.345302e-05, 1.786591e-05], atol=1e-4
+        )
+        assert_allclose(
+            im.coords['Y'][[0, -1]], [8.673617e-20, 1.162500e-03], atol=1e-4
+        )
+        assert_allclose(
+            im.coords['X'][[0, -1]], [8.673617e-20, 1.162500e-03], atol=1e-4
+        )
+        assert im.attrs['path'] == im.path
+        assert len(im.timestamps) == 20
+        assert im.timestamps[0] == numpy.datetime64('2015-01-27T10:14:30.304')
+        assert im.size == 5242880
+        assert im.nbytes == 5242880
+        assert im.ndim == 4
+        assert isinstance(im.xml_element, ElementTree.Element)
+
+        attrs = im.attrs['HardwareSetting']
+        assert attrs['Software'] == 'LAS-AF [ BETA ] 1.8.0.12889'
+
+        data = im.asarray(asrgb=False, mode='r', out='memmap')
+        assert isinstance(data, numpy.memmap)
+        if 'JPEG' not in name:
+            assert data.sum(dtype=numpy.uint64) == 80177798
+
+        xdata = im.asxarray(asrgb=False, mode='r', out=None)
+        assert isinstance(xdata, xarray.DataArray)
+        assert_array_equal(xdata.data, data)
+        assert xdata.name == im.name
+        assert xdata.dtype == im.dtype
+        assert xdata.dims == im.dims
+        assert xdata.shape == im.shape
+        assert xdata.attrs == im.attrs
+        assert_array_equal(xdata.coords['Z'], im.coords['Z'])
+
+        memory_block = im.memory_block
+        str(im.memory_block)
+        assert isinstance(memory_block, LifMemoryBlock)
+        assert memory_block.id == ''
+        assert memory_block.offset == -1
+        assert memory_block.size == 5242880
+        assert memory_block.read() == data.tobytes()
+
+
+@pytest.mark.parametrize('name', ['LOF', 'TIF'])
+def test_xlif_lof(name):
+    """Test XLIF file referenceing LOF."""
+    filename = (
+        DATA
+        / 'XLEFReaderForBioformats/rgb channel test'
+        / f'XLEF-{name} rgb channel test/Metadata'
+        / 'z then lambda.xlif'
+    )
+
+    with LifFile(filename, mode='r', squeeze=True) as xlif:
+        assert xlif.format == LifFileFormat.XLIF
+        str(xlif)
+
+        xdata = xlif.series[0].asxarray(asrgb=False, mode='r', out='memmap')
+        assert isinstance(xdata, xarray.DataArray)
+        assert isinstance(xdata.data, numpy.memmap)
+        assert xdata.name == 'z then lambda'
+        assert xdata.dtype == numpy.uint8
+        assert xdata.sizes == {
+            'T': 3,
+            'C': 2,
+            'Z': 5,
+            'Y': 1200,
+            'X': 1600,
+            'S': 3,
+        }
+        assert xdata.values.sum(dtype=numpy.uint64) == 6270530156
 
 
 @pytest.mark.parametrize('index', range(len(SCANMODES)))
@@ -1095,8 +1240,8 @@ def test_scan_modes(index):
             assert data.dtype == dtype
 
 
-def test_flim():
-    """Test read FLIM dataset."""
+def test_flim_lif():
+    """Test LIF file with FLIM image."""
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
     with LifFile(filename) as lif:
         str(lif)
@@ -1124,7 +1269,7 @@ def test_flim():
         assert not flim.is_bidirectional
         assert not flim.is_sinusoidal
         assert len(flim.timestamps) == 0
-        assert len(flim.memory_block.read(lif.filehandle)) == 15502568
+        assert len(flim.memory_block.read()) == 15502568
         with pytest.raises(NotImplementedError):
             flim.asxarray()
 
@@ -1165,7 +1310,7 @@ def test_flim():
         assert gamma == 1.0
 
 
-def test_flim_flim():
+def test_flim_lof():
     """Test LOF file with FLIM image."""
     filename = (
         DATA
@@ -1175,11 +1320,11 @@ def test_flim_flim():
     )
     with LifFile(filename) as lof:
         str(lof)
-        assert lof.is_lof
+        assert lof.format == LifFileFormat.LOF
         assert lof.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
         assert len(lof.series) == 1
         memblock = lof.memory_blocks['MemBlock_1643']
-        assert len(memblock.read(lof.filehandle)) == memblock.size
+        assert len(memblock.read()) == memblock.size
 
         for image in lof.series:
             str(image)
@@ -1204,7 +1349,7 @@ def test_flim_flim():
         assert not flim.is_bidirectional
         assert not flim.is_sinusoidal
         assert len(flim.timestamps) == 0
-        assert len(flim.memory_block.read(lof.filehandle)) == 1538370
+        assert len(flim.memory_block.read()) == 1538370
         with pytest.raises(NotImplementedError):
             flim.asxarray()
 
@@ -1279,10 +1424,10 @@ def test_lof_no_image():
     )
     with LifFile(filename) as lof:
         str(lof)
-        assert lof.is_lof
+        assert lof.format == LifFileFormat.LOF
         assert len(lof.series) == 0
         memblock = lof.memory_blocks['MemBlock_1642']
-        assert len(memblock.read(lof.filehandle)) == memblock.size
+        assert len(memblock.read()) == memblock.size
 
 
 def test_lof_defective(caplog):
@@ -1371,7 +1516,8 @@ def test_signal_from_lif():
 @pytest.mark.parametrize(
     'fname',
     glob.glob('**/*.lif', root_dir=DATA, recursive=True)
-    + glob.glob('**/*.lof', root_dir=DATA, recursive=True),
+    + glob.glob('**/*.lof', root_dir=DATA, recursive=True)
+    + glob.glob('**/*.xlif', root_dir=DATA, recursive=True),
 )
 def test_glob(fname):
     """Test read all LIF files."""
@@ -1380,11 +1526,17 @@ def test_glob(fname):
     fname = DATA / fname
     with LifFile(fname) as lif:
         str(lif)
-        if lif.is_lof:
-            one = lif.name not in {'FrameProperties', ''}
+        if lif.format in {LifFileFormat.LOF, LifFileFormat.XLIF}:
+            one = lif.name not in {
+                'FrameProperties',
+                'IOManagerConfiguation',
+                '',
+            }
             assert len(lif.series) == int(one)
         else:
             assert len(lif.series) > 0
+        if lif.format == LifFileFormat.XLIF and '8--Proj_LOF001' in str(fname):
+            pytest.xfail(reason='cannot read image from old-style LOF')
         for image in lif.series:
             str(image)
             if image.is_flim:
