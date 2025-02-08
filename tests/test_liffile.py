@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.2.6
+:Version: 2025.2.8
 
 """
 
@@ -870,7 +870,7 @@ def test_imread(asxarray):
     """Test imread function."""
     filename = DATA / 'ScanModesExamples.lif'
 
-    data = imread(filename, image=5, asrgb=True, out=None, asxarray=asxarray)
+    data = imread(filename, image=5, out=None, asxarray=asxarray)
     if asxarray:
         assert isinstance(data, DataArray)
         assert data.sizes == {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128}
@@ -915,6 +915,8 @@ def test_lif(filetype):
         assert len(series) == 200
         with pytest.raises(IndexError):
             lif.images[200]
+        with pytest.raises(KeyError):
+            lif.images['ABC']
 
         for path, im in zip(series.paths(), series):
             assert im.path == path
@@ -923,12 +925,19 @@ def test_lif(filetype):
         images = series.findall('XZEXcLambda/Lambda.*', flags=re.IGNORECASE)
         assert len(images) == 9
         assert images[0].name == 'Lambda_496nm'
+        assert images[0].parent_image is None
+
+        im = series.find('Lambda_496nm', flags=re.IGNORECASE)
+        assert im is images[0]
+        assert series.find('ABC', default=im) is im
 
         im = series[5]
         str(im)
         assert series[im.path] is im
         assert series[im.name + '$'] is im
         assert im.parent is lif
+        assert im.parent_image is None
+        assert im.child_images == ()
         assert im.name == 'XYZT'
         assert im.path == 'XYZT'
         assert im.uuid == '06f46831-5b37-11e3-8f53-eccd6d2154b5'
@@ -956,11 +965,11 @@ def test_lif(filetype):
         assert attrs['Software'] == 'LAS-AF [ BETA ] 3.3.0.10067'
         assert attrs['ATLConfocalSettingDefinition']['LineTime'] == 0.0025
 
-        data = im.asarray(asrgb=False, mode='r', out='memmap')
+        data = im.asarray(mode='r', out='memmap')
         assert isinstance(data, numpy.memmap)
         assert data.sum(dtype=numpy.uint64) == 27141756
 
-        xdata = im.asxarray(asrgb=False, mode='r', out=None)
+        xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
         assert xdata.name == im.name
@@ -1036,6 +1045,8 @@ def test_lof():
         assert im.name == 'XYCST'
         assert im.path == 'XYCST'
         assert im.uuid == '7949fec1-59bf-11ec-9875-a4bb6dd99fac'
+        assert im.parent_image is None
+        assert im.child_images == ()
         assert len(im.xml_element) > 0
         assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
@@ -1058,11 +1069,11 @@ def test_lof():
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS X [ BETA ] 5.0.3.24880'
 
-        data = im.asarray(asrgb=False, mode='r', out='memmap')
+        data = im.asarray(mode='r', out='memmap')
         assert isinstance(data, numpy.memmap)
         assert data.sum(dtype=numpy.uint64) == 1456570356
 
-        xdata = im.asxarray(asrgb=False, mode='r', out=None)
+        xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
         assert xdata.name == im.name
@@ -1168,12 +1179,12 @@ def test_xlif(name):
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS-AF [ BETA ] 1.8.0.12889'
 
-        data = im.asarray(asrgb=False, mode='r', out='memmap')
+        data = im.asarray(mode='r', out='memmap')
         assert isinstance(data, numpy.memmap)
         if 'JPEG' not in name:
             assert data.sum(dtype=numpy.uint64) == 80177798
 
-        xdata = im.asxarray(asrgb=False, mode='r', out=None)
+        xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
         assert xdata.name == im.name
@@ -1206,7 +1217,7 @@ def test_xlif_lof(name):
         assert xlif.format == LifFileFormat.XLIF
         str(xlif)
 
-        xdata = xlif.images[0].asxarray(asrgb=False, mode='r', out='memmap')
+        xdata = xlif.images[0].asxarray(mode='r', out='memmap')
         assert isinstance(xdata, xarray.DataArray)
         assert isinstance(xdata.data, numpy.memmap)
         assert xdata.name == 'z then lambda'
@@ -1293,11 +1304,100 @@ def test_xlef(name):
 
         data = im.asarray()
         assert isinstance(data, numpy.ndarray)
-        assert data.sum(dtype=numpy.uint64) == 421325689
+        rgb = data.sum(dtype=numpy.uint64, axis=(0, 1)).tolist()
+        assert rgb == [146107764, 141298533, 133919392]
 
         xdata = im.asxarray()
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
+
+
+def test_lifext():
+    """Test LIFEXT file."""
+    filename = str(DATA / 'XLEFReaderForBioformats/dimension tests LIFs/XYZCS')
+
+    with (
+        LifFile(filename + '.lif') as parent,
+        LifFile(filename + '.lifext', _parent=parent) as lifext,
+    ):
+        assert lifext.format == LifFileFormat.LIFEXT
+        str(lifext)
+        assert lifext.parent is parent
+        assert lifext.filename == 'XYZCS.lifext'
+        assert not lifext.filehandle.closed
+        assert lifext.name == ''
+        assert lifext.version == 1
+        assert lifext.uuid is None
+        assert lifext.datetime is None
+        assert len(lifext.memory_blocks) == 7
+        assert isinstance(lifext.xml_element, ElementTree.Element)
+        assert repr(lifext).startswith('<LifFile ')
+        assert lifext.xml_header().startswith(
+            '<LMSDataContainerEnhancedHeader Version="1">'
+        )
+
+        series = lifext.images
+        str(series)
+        assert isinstance(series, LifImageSeries)
+        assert len(series) == 7
+        with pytest.raises(IndexError):
+            lifext.images[8]
+
+        for path, im in zip(series.paths(), series):
+            assert im.path == path
+            assert isinstance(im, LifImage)
+
+        images = series.findall('XYZCS_pmd_0.*', flags=re.IGNORECASE)
+        assert len(images) == 6
+
+        im = images[0]
+        assert im.name == 'XYZCS_pmd_0'
+        assert im.parent_image is parent.images[0]
+        assert im.parent_image.child_images == ()  # TODO == (im,)
+        assert im.child_images == (images[1],)
+
+        im = series[1]
+        str(im)
+        assert series[im.path] is im
+        assert series[im.name + '$'] is im
+        assert im.parent is lifext
+        assert im.name == 'XYZCS_pmd_1'
+        assert im.path == 'MemBlock_836/XYZCS_pmd_0/XYZCS_pmd_1'
+        assert im.uuid == '2e0b0305-599f-11ec-9875-a4bb6dd99fac'
+        assert len(im.xml_element) > 0
+        assert im.xml_element_smd is None
+        assert im.dtype == numpy.uint8
+        assert im.itemsize == 1
+        assert im.sizes == {'M': 4, 'C': 2, 'Z': 5, 'Y': 300, 'X': 400}
+        assert 'C' not in im.coords
+        assert_allclose(im.coords['Z'][[0, -1]], [0.0, 7.19784e-05])
+        assert im.attrs['path'] != im.parent.name + '/' + im.path
+        assert len(im.timestamps) == 0
+        assert im.size == 4800000
+        assert im.nbytes == 4800000
+        assert im.ndim == 5
+        assert isinstance(im.xml_element, ElementTree.Element)
+
+        data = im.asarray(mode='r', out='memmap')
+        assert isinstance(data, numpy.memmap)
+        assert data.sum(dtype=numpy.uint64) == 180034506
+
+        xdata = im.asxarray(mode='r', out=None)
+        assert isinstance(xdata, xarray.DataArray)
+        assert_array_equal(xdata.data, data)
+        assert xdata.name == im.name
+        assert xdata.dtype == im.dtype
+        assert xdata.dims == im.dims
+        assert xdata.shape == im.shape
+        assert xdata.attrs == im.attrs
+
+        memory_block = im.memory_block
+        str(im.memory_block)
+        assert isinstance(memory_block, LifMemoryBlock)
+        assert memory_block.id == 'MemBlock_838'
+        assert memory_block.offset == 19222545
+        assert memory_block.size == 4800000
+        assert memory_block.read() == data.tobytes()
 
 
 @pytest.mark.parametrize('index', range(len(SCANMODES)))
@@ -1340,8 +1440,12 @@ def test_flim_lif():
         for image in lif.images:
             str(image)
 
+        base = lif.images['sample1_slice1']
+
         flim = lif.images['FLIM Compressed']
         assert isinstance(flim, LifFlimImage)
+        assert flim.parent_image is base
+        assert len(flim.child_images) == 9
         assert lif.uuid == 'd9f87ad9-b958-11ed-bb27-00506220277a'
         assert flim.is_flim
         assert flim.xml_element_smd == flim.xml_element
@@ -1365,6 +1469,8 @@ def test_flim_lif():
             flim.asxarray()
 
         intensity = lif.images['/Intensity']
+        assert intensity in flim.child_images
+        assert intensity.parent_image is flim
         assert intensity.xml_element_smd is not None
         data = intensity.asxarray()
         assert data.shape == (1024, 1024)
@@ -1372,6 +1478,8 @@ def test_flim_lif():
         assert data.attrs['TileScanInfo']['Tile']['PosX'] == -0.0471300149
 
         mean = lif.images['Phasor Intensity$']
+        assert mean in flim.child_images
+        assert mean.parent_image is flim
         assert mean.xml_element_smd is not None
         data = mean.asxarray()
         assert data.shape == (1024, 1024)
@@ -1379,6 +1487,8 @@ def test_flim_lif():
         assert data.attrs['TileScanInfo']['Tile']['PosX'] == -0.0471300149
 
         real = lif.images['Phasor Real']
+        assert real in flim.child_images
+        assert real.parent_image is flim
         assert real.xml_element_smd is not None
         data = real.asxarray()
         assert data.shape == (1024, 1024)
@@ -1386,6 +1496,8 @@ def test_flim_lif():
         assert data.attrs['F16']['FactorF32ToF16'] == 1.0
 
         real = lif.images['Fast Flim']
+        assert real in flim.child_images
+        assert real.parent_image is flim
         assert real.xml_element_smd is not None
         data = real.asxarray()
         assert data.shape == (1024, 1024)
@@ -1393,6 +1505,8 @@ def test_flim_lif():
         assert data.attrs['F16']['FactorF32ToF16'] == 1000000000.0
 
         mask = lif.images['Phasor Mask']
+        assert mask in flim.child_images
+        assert mask.parent_image is flim
         assert mask.xml_element_smd is not None
         data = mask.asxarray()
         assert data.shape == (1024, 1024)
@@ -1462,12 +1576,6 @@ def test_rgb():
         assert_array_equal(
             data.sum(dtype=numpy.uint64, axis=(0, 1, 2)),
             [12387812, 9225469, 82284132],
-        )
-
-        data = image.asxarray(asrgb=False)
-        assert_array_equal(
-            data.sum(dtype=numpy.uint64, axis=(0, 1, 2)),
-            [82284132, 9225469, 12387812],
         )
 
         image = lif.images[1]
@@ -1645,7 +1753,8 @@ def test_xml2dict():
     glob.glob('**/*.lif', root_dir=DATA, recursive=True)
     + glob.glob('**/*.lof', root_dir=DATA, recursive=True)
     + glob.glob('**/*.xlif', root_dir=DATA, recursive=True)
-    + glob.glob('**/*.xlef', root_dir=DATA, recursive=True),
+    + glob.glob('**/*.xlef', root_dir=DATA, recursive=True)
+    + glob.glob('**/*.lifext', root_dir=DATA, recursive=True),
 )
 def test_glob(fname):
     """Test read all LIF files."""
