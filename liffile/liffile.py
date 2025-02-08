@@ -29,18 +29,19 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read Leica image files (LIF, LOF, XLIF, XLCF, and XLEF).
+"""Read Leica image files (LIF, LOF, XLIF, XLCF, XLEF, and LIFEXT).
 
 Liffile is a Python library to read image and metadata from Leica image files:
 LIF (Leica Image File), LOF (Leica Object File), XLIF (XML Image File),
-XLCF (XML Collection File), and XLEF (XML Experiment File).
+XLCF (XML Collection File), XLEF (XML Experiment File), and LIFEXT (Leica
+Image File Extension).
 
 These files are written by LAS X software to store collections of images
 and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.6
+:Version: 2025.2.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -72,6 +73,15 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.2.8
+
+- Support LIFEXT files.
+- Remove asrgb parameter from LifImage.asarray (breaking).
+- Do not apply BGR correction when using memory block frames.
+- Avoid copying single frame to output array.
+- Add LifImage.parent_image and child_images properties.
+- Add LifImageSeries.find method.
 
 2025.2.6
 
@@ -127,7 +137,7 @@ This library is in its early stages of development. It is not feature-complete.
 Large, backwards-incompatible changes may occur between revisions.
 
 Specifically, the following features are currently not supported:
-XLLF and LIFEXT formats, image mosaics and pyramids, partial image reads,
+XLLF formats, image mosaics and pyramids, partial image reads,
 reading non-image data like FLIM/TCSPC, heterogeneous channel data types,
 discontiguous storage, and bit increments.
 
@@ -182,7 +192,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.2.6'
+__version__ = '2025.2.8'
 
 __all__ = [
     '__version__',
@@ -240,10 +250,10 @@ def imread(
     /,
     image: int | str = 0,
     *,
-    asrgb: bool = True,
     squeeze: bool = True,
     out: OutputType = None,
     asxarray: Literal[False] = ...,
+    **kwargs: Any,
 ) -> NDArray[Any]: ...
 
 
@@ -253,10 +263,10 @@ def imread(
     /,
     image: int | str = 0,
     *,
-    asrgb: bool = True,
     squeeze: bool = True,
     out: OutputType = None,
     asxarray: Literal[True] = ...,
+    **kwargs: Any,
 ) -> DataArray: ...
 
 
@@ -341,7 +351,7 @@ class LifFileFormat(enum.Enum):
 
 @final
 class LifFile:
-    """Leica image file (LIF, LOF, XLIF, XLEF, or XLCF).
+    """Leica image file (LIF, LOF, XLIF, XLEF, XLCF, or LIFEXT).
 
     ``LifFile`` instances are not thread-safe. All attributes are read-only.
 
@@ -499,11 +509,16 @@ class LifFile:
             self._xml_header = (fh.tell(), xmlsize * 2)
             xml_header = fh.read(xmlsize * 2).decode('utf-16-le')
 
+        elif xml_header.startswith('<LMSDataContainerEnhancedHeader'):
+            self.format = LifFileFormat.LIFEXT
+
         self.xml_element = ElementTree.fromstring(xml_header)
+        del xml_header
 
         element = self.xml_element.find('./Element')
         if element is None:
-            logger().warning(f'{self!r} Element element not found in XML')
+            if self.format != LifFileFormat.LIFEXT:
+                logger().warning(f'{self!r} Element element not found in XML')
         else:
             self.name = element.attrib.get('Name', self.name)
             self.uuid = element.attrib.get('UniqueID')
@@ -540,7 +555,7 @@ class LifFile:
             memblock.id = memblock_id  # LOF memory blocks don't have id
             self.memory_blocks[memblock.id] = memblock
 
-        elif self.format == LifFileFormat.LIF:
+        elif self.format in {LifFileFormat.LIF, LifFileFormat.LIFEXT}:
             while True:
                 try:
                     memblock = LifMemoryBlock(self)
@@ -672,9 +687,9 @@ class LifFile:
         return indent(
             repr(self),
             f'path: {self._path}',
-            f'datetime: {self.datetime}',
             f'format: {self.format}',
             f'uuid: {self.uuid}',
+            f'datetime: {self.datetime}',
             indent(
                 'images:',
                 *(f'{i} {image!r}' for i, image in enumerate(self.images)),
@@ -824,6 +839,33 @@ class LifImageABC(ABC):
         """Image metadata from XML elements."""
 
     @cached_property
+    def parent_image(self) -> LifImageABC | None:
+        """Parent image, if any."""
+        if '/' not in self.path:
+            return None
+        dirname = self.path.rsplit('/', 1)[0]
+        if self.parent.format != LifFileFormat.LIFEXT or '/' in dirname:
+            return self.parent.images.find(f'^{dirname}$')
+        # LIFEXT root image references image in parent LIF file
+        # via MemoryBlockID
+        if self.parent.parent is None:
+            return None
+        for image in self.parent.parent.images:
+            if image.memory_block.id == dirname:
+                return image
+        return None
+
+    @cached_property
+    def child_images(self) -> tuple[LifImageABC, ...]:
+        """Child images."""
+        # return tuple(
+        #     image
+        #     for image in self.parent.images
+        #     if image.parent_image is self
+        # )
+        return self.parent.images.findall(f'^{self.path}/[^/]*$')
+
+    @cached_property
     def memory_block(self) -> LifMemoryBlock:
         """Memory block containing image data."""
         if self.parent.format in {LifFileFormat.LOF, LifFileFormat.XLIF}:
@@ -908,11 +950,14 @@ class LifImageABC(ABC):
         name = self.__class__.__name__
         path = self.path
         dtype = self.dtype
+        prefix = ''
         sizes = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
-        r = f'<{name} {path!r} ({sizes}) {dtype}>'
-        if len(r) > columns + 2:
-            path = '… ' + self.path[len(r) - columns :]
-            r = f'<{name} {path!r} ({sizes}) {dtype}>'
+        while True:
+            r = f'<{name} {(prefix + path)!r} ({sizes}) {dtype}>'
+            if len(r) < columns or '/' not in path:
+                break
+            path = path.split('/', 1)[-1]
+            prefix += '…/'
         return r
 
     def __str__(self) -> str:
@@ -1140,7 +1185,6 @@ class LifImage(LifImageABC):
     def asarray(
         self,
         *,
-        asrgb: bool = True,
         mode: str = 'r',
         out: OutputType = None,
     ) -> NDArray[Any]:
@@ -1149,9 +1193,6 @@ class LifImage(LifImageABC):
         Dimensions are returned in order stored in file.
 
         Parameters:
-            asrgb:
-                Return RGB samples in RGB order.
-                If true, the returned array might not be contiguous.
             mode:
                 Memmap file open mode. The default is read-only.
             out:
@@ -1167,18 +1208,19 @@ class LifImage(LifImageABC):
 
         Returns:
             :
-                Image data as numpy array.
+                Image data as numpy array. RGB samples may not be contiguous.
 
         """
         data = self.memory_block.read_array(
             self.shape, self.dtype, mode=mode, out=out
         )
         if (
-            asrgb
+            len(self.memory_block.frames) == 0  # disable for frames
             and self.sizes.get('S', 0) == 3
             and self._channels[0].channel_tag == 3  # blue
             and self._channels[1].channel_tag == 2  # green
         ):
+            # BGR to RGB
             data = data[..., ::-1]
         return data
 
@@ -1364,8 +1406,10 @@ class LifImageSeries(Sequence[LifImageABC]):
                     image.path = path
             return
 
+        keepbase = parent.format == LifFileFormat.LIFEXT
         for path, element in LifImageSeries._image_iter(parent.xml_element):
-            path = path.split('/', 1)[-1]
+            if not keepbase:
+                path = path.split('/', 1)[-1]
             if element.find('./Data/SingleMoleculeDetection') is None:
                 image = LifImage(parent, element, path)
             else:
@@ -1382,6 +1426,13 @@ class LifImageSeries(Sequence[LifImageABC]):
         elements = xml_element.findall('./Children/Element')
         if len(elements) < 1:
             elements = xml_element.findall('./Element')
+        if len(elements) < 1:
+            # LIFEXT root, use MemoryBlockID as base path
+            childrenof = xml_element.find('./ChildrenOf')
+            if childrenof is not None:
+                base_path += childrenof.get('MemoryBlockID', '')
+                elements = childrenof.findall('./Element')
+
         for element in elements:
             name = element.attrib['Name']
             if base_path == '' or base_path.endswith(name):
@@ -1402,6 +1453,34 @@ class LifImageSeries(Sequence[LifImageABC]):
                 # sub images
                 yield from LifImageSeries._image_iter(element, path)
 
+    def paths(self) -> Iterator[str]:
+        """Return iterator over image paths."""
+        yield from self._images.keys()
+
+    def items(self) -> Iterator[tuple[str, LifImageABC]]:
+        """Return iterator over image paths and images."""
+        yield from self._images.items()
+
+    def find(
+        self, key: str, /, *, flags: int = re.IGNORECASE, default: Any = None
+    ) -> LifImageABC | None:
+        """Return first image with matching path pattern, if any.
+
+        Parameters:
+            key:
+                Regular expression pattern to match LifImage.path.
+            flags:
+                Regular expression flags.
+            default:
+                Value to return if no image with matching path found.
+
+        """
+        pattern = re.compile(key, flags=flags)
+        for path, image in self._images.items():
+            if pattern.search(path) is not None:
+                return image
+        return default  # type: ignore[no-any-return]
+
     def findall(
         self, key: str, /, *, flags: int = re.IGNORECASE
     ) -> tuple[LifImageABC, ...]:
@@ -1421,20 +1500,18 @@ class LifImageSeries(Sequence[LifImageABC]):
                 images.append(image)
         return tuple(images)
 
-    def paths(self) -> Iterator[str]:
-        """Return iterator over image paths."""
-        yield from self._images.keys()
-
-    def items(self) -> Iterator[tuple[str, LifImageABC]]:
-        """Return iterator over image paths and images."""
-        yield from self._images.items()
-
     def __getitem__(  # type: ignore[override]
         self,
         key: int | str,
         /,
     ) -> LifImageABC:
-        """Return image at index or first image with matching path."""
+        """Return image at index or first image with matching path.
+
+        Raises:
+            IndexError: if integer index out of range.
+            KeyError: if no image with matching path found.
+
+        """
         if isinstance(key, int):
             try:
                 key = tuple(self._images.keys())[key]
@@ -1447,7 +1524,7 @@ class LifImageSeries(Sequence[LifImageABC]):
         for path, image in self._images.items():
             if pattern.search(path) is not None:
                 return image
-        raise IndexError(f'image {key!r} not found')
+        raise KeyError(f'image {key!r} not found')
 
     def __len__(self) -> int:
         return len(self._images)
@@ -1526,10 +1603,10 @@ class LifMemoryBlock:
 
         if parent.format == LifFileFormat.LOF:
             fmtstr = '<BQ'
+        elif parent.version == 2 or parent.format == LifFileFormat.LIFEXT:
+            fmtstr = '<IIBQBI'
         elif parent.version == 1:
             fmtstr = '<IIBIBI'
-        elif parent.version == 2:
-            fmtstr = '<IIBQBI'
         else:
             raise ValueError(f'invalid memory block {parent.version=}')
 
@@ -1595,9 +1672,8 @@ class LifMemoryBlock:
         buffer = buffer.reshape(-1).view(numpy.uint8)
 
         if self.parent.format == LifFileFormat.XLIF:
-            dirname = self.parent.dirname
             for frame in self.frames:
-                im = frame.imread(os.path.join(dirname, frame.file))
+                im = frame.imread(self.parent.dirname)
                 im = im.reshape(-1).view(numpy.uint8)
                 buffer[frame.offset : frame.offset + frame.size] = im
             return
@@ -1664,6 +1740,15 @@ class LifMemoryBlock:
                 order='C',
             )
 
+        if (
+            out is None
+            and self.parent.format == LifFileFormat.XLIF
+            and len(self.frames) == 1
+        ):
+            # avoid copy single frame to output array
+            data = self.frames[0].imread(self.parent.dirname)
+            return data.reshape(shape).astype(dtype)
+
         data = create_output(out, shape, dtype)
         if data.nbytes != nbytes:
             raise ValueError('size mismatch')
@@ -1694,7 +1779,7 @@ class LifMemoryFrame:
     """File name."""
 
     offset: int
-    """Byte offset of frame frame in memory block."""
+    """Byte offset of frame in memory block."""
 
     size: int
     """Size of frame in bytes."""
@@ -1717,15 +1802,21 @@ class LifMemoryFrame:
 
     def imread(
         self,
-        filename: str,
+        dirname: str,
         /,
         **kwargs: Any,
     ) -> NDArray[Any]:
-        """Return frame image from file."""
-        ext = os.path.splitext(filename)[1]
+        """Return image frame from file.
+
+        Parameters:
+            dirname: Directory name of parent file.
+            **kwargs: Optional arguments to image reader function.
+
+        """
+        ext = os.path.splitext(self.file)[1].lower()
         if ext not in IMREAD:
             raise ValueError(f'unsupported file extension {ext!r}')
-        im = IMREAD[ext](filename, **kwargs)
+        im = IMREAD[ext](os.path.join(dirname, self.file), **kwargs)
         if im.nbytes != self.size:
             if (
                 im.ndim == 3
@@ -1802,7 +1893,7 @@ class LifRawData:
     """Attributes of SingleMoleculeDetection/Dataset/RawData XML element."""
 
     format: str
-    """Raw data dormat."""
+    """Raw data format."""
     voxel_size_x: float
     """Spatial dimension size in m."""
     voxel_size_y: float
@@ -1811,7 +1902,7 @@ class LifRawData:
     """Spatial dimension size in m."""
     clock_period: float
     """Base clock in s."""
-    syncronization_marker_period: float
+    synchronization_marker_period: float
     """Clock period of the FCS counter in s."""
     frame_repetitions_marked: bool
     """Frames completed when number photons detected."""
