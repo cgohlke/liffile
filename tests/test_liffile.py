@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.2.8
+:Version: 2025.2.10
 
 """
 
@@ -63,8 +63,9 @@ from liffile import (
     __version__,
     imread,
     logger,
+    xml2dict,
 )
-from liffile.liffile import xml2dict
+from liffile.liffile import case_sensitive_path
 from numpy.testing import assert_allclose, assert_array_equal
 from xarray import DataArray
 
@@ -918,9 +919,9 @@ def test_lif(filetype):
         with pytest.raises(KeyError):
             lif.images['ABC']
 
-        for path, im in zip(series.paths(), series):
-            assert im.path == path
-            assert isinstance(im, LifImage)
+        for image in series:
+            str(image)
+            assert isinstance(image, LifImage)
 
         images = series.findall('XZEXcLambda/Lambda.*', flags=re.IGNORECASE)
         assert len(images) == 9
@@ -942,7 +943,6 @@ def test_lif(filetype):
         assert im.path == 'XYZT'
         assert im.uuid == '06f46831-5b37-11e3-8f53-eccd6d2154b5'
         assert len(im.xml_element) > 0
-        assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.shape == (7, 5, 2, 128, 128)
@@ -966,7 +966,7 @@ def test_lif(filetype):
         assert attrs['ATLConfocalSettingDefinition']['LineTime'] == 0.0025
 
         data = im.asarray(mode='r', out='memmap')
-        assert isinstance(data, numpy.memmap)
+        assert isinstance(data, numpy.memmap), type(data)
         assert data.sum(dtype=numpy.uint64) == 27141756
 
         xdata = im.asxarray(mode='r', out=None)
@@ -1028,10 +1028,9 @@ def test_lof():
         assert isinstance(series, LifImageSeries)
         assert len(series) == 1
 
-        for path, im in zip(series.paths(), series):
-            assert im.path == path
-            assert im.path == im.name
-            assert isinstance(im, LifImage)
+        for image in series:
+            assert image.path == image.name
+            assert isinstance(image, LifImage)
 
         images = series.findall('XYCST', flags=re.IGNORECASE)
         assert len(images) == 1
@@ -1048,7 +1047,6 @@ def test_lof():
         assert im.parent_image is None
         assert im.child_images == ()
         assert len(im.xml_element) > 0
-        assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.shape == (2, 4, 3, 1200, 1600)
@@ -1070,7 +1068,7 @@ def test_lof():
         assert attrs['Software'] == 'LAS X [ BETA ] 5.0.3.24880'
 
         data = im.asarray(mode='r', out='memmap')
-        assert isinstance(data, numpy.memmap)
+        assert isinstance(data, numpy.memmap), type(data)
         assert data.sum(dtype=numpy.uint64) == 1456570356
 
         xdata = im.asxarray(mode='r', out=None)
@@ -1134,10 +1132,10 @@ def test_xlif(name):
         assert isinstance(series, LifImageSeries)
         assert len(series) == 1
 
-        for path, im in zip(series.paths(), series):
-            assert im.path == path
-            assert im.path == im.name
-            assert isinstance(im, LifImage)
+        for image in series:
+            str(image)
+            assert image.path == image.name
+            assert isinstance(image, LifImage)
 
         images = series.findall('ImageXYZ10C2', flags=re.IGNORECASE)
         assert len(images) == 1
@@ -1152,7 +1150,6 @@ def test_xlif(name):
         assert im.path == 'ImageXYZ10C2'
         # assert im.uuid == '2b165f65-cbdf-11e4-96dc-bc305be49d23'
         assert len(im.xml_element) > 0
-        assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.shape == (10, 2, 512, 512)
@@ -1180,7 +1177,7 @@ def test_xlif(name):
         assert attrs['Software'] == 'LAS-AF [ BETA ] 1.8.0.12889'
 
         data = im.asarray(mode='r', out='memmap')
-        assert isinstance(data, numpy.memmap)
+        assert isinstance(data, numpy.memmap), type(data)
         if 'JPEG' not in name:
             assert data.sum(dtype=numpy.uint64) == 80177798
 
@@ -1219,7 +1216,7 @@ def test_xlif_lof(name):
 
         xdata = xlif.images[0].asxarray(mode='r', out='memmap')
         assert isinstance(xdata, xarray.DataArray)
-        assert isinstance(xdata.data, numpy.memmap)
+        assert isinstance(xdata.data, numpy.memmap), type(xdata.data)
         assert xdata.name == 'z then lambda'
         assert xdata.dtype == numpy.uint8
         assert xdata.sizes == {
@@ -1268,10 +1265,10 @@ def test_xlef(name):
         assert isinstance(series, LifImageSeries)
         assert len(series) == 5
 
-        for path, im in zip(series.paths(), series):
-            assert im.path == path
-            assert im.path.endswith(im.name)
-            assert isinstance(im, LifImage)
+        for image in series:
+            str(image)
+            assert image.path.endswith(image.name)
+            assert isinstance(image, LifImage)
 
         images = series.findall('Series010_EDF001', flags=re.IGNORECASE)
         assert len(images) == 2
@@ -1291,7 +1288,6 @@ def test_xlef(name):
         assert im.path == 'Series010_EDF001/EDF Image'
         assert im.uuid == '67aba58d-b745-11e4-941f-028037ec0200'
         assert len(im.xml_element) == 3
-        assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.sizes == {'Y': 1119, 'X': 1477, 'S': 3}
@@ -1343,9 +1339,9 @@ def test_lifext():
         with pytest.raises(IndexError):
             lifext.images[8]
 
-        for path, im in zip(series.paths(), series):
-            assert im.path == path
-            assert isinstance(im, LifImage)
+        for image in series:
+            str(image)
+            assert isinstance(image, LifImage)
 
         images = series.findall('XYZCS_pmd_0.*', flags=re.IGNORECASE)
         assert len(images) == 6
@@ -1365,7 +1361,6 @@ def test_lifext():
         assert im.path == 'MemBlock_836/XYZCS_pmd_0/XYZCS_pmd_1'
         assert im.uuid == '2e0b0305-599f-11ec-9875-a4bb6dd99fac'
         assert len(im.xml_element) > 0
-        assert im.xml_element_smd is None
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.sizes == {'M': 4, 'C': 2, 'Z': 5, 'Y': 300, 'X': 400}
@@ -1379,7 +1374,7 @@ def test_lifext():
         assert isinstance(im.xml_element, ElementTree.Element)
 
         data = im.asarray(mode='r', out='memmap')
-        assert isinstance(data, numpy.memmap)
+        assert isinstance(data, numpy.memmap), type(data)
         assert data.sum(dtype=numpy.uint64) == 180034506
 
         xdata = im.asxarray(mode='r', out=None)
@@ -1431,12 +1426,22 @@ def test_scan_modes(index):
             assert data.dtype == dtype
 
 
-def test_flim_lif():
-    """Test LIF file with FLIM image."""
-    filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
+@pytest.mark.parametrize(
+    'name',
+    [
+        'FLIM_testdata.lif',
+        'XLEF_LOF/FLIM_testdata.xlef',
+        'XLEF_OME/FLIM_testdata.xlef',
+        'XLEF_TIF/FLIM_testdata.xlef',
+        'XLEF_AIVIA/FLIM_testdata.xlef',
+        '../case_sensitive/FLIM_testdata/FLIM_testdata.xlef',
+    ],
+)
+def test_flim(name):
+    """Test FLIM image formats."""
+    filename = DATA / 'FLIM_testdata' / name
     with LifFile(filename) as lif:
         str(lif)
-
         for image in lif.images:
             str(image)
 
@@ -1444,11 +1449,12 @@ def test_flim_lif():
 
         flim = lif.images['FLIM Compressed']
         assert isinstance(flim, LifFlimImage)
-        assert flim.parent_image is base
+        if name.endswith('.lif'):
+            assert flim.parent_image is base
         assert len(flim.child_images) == 9
         assert lif.uuid == 'd9f87ad9-b958-11ed-bb27-00506220277a'
         assert flim.is_flim
-        assert flim.xml_element_smd == flim.xml_element
+        # assert flim.xml_element_smd == flim.xml_element
         assert flim.dtype == numpy.uint16
         assert flim.sizes == {'Y': 1024, 'X': 1024, 'H': 528}
         assert pytest.approx(flim.coords['X'][-1]) == 0.0005563808000453999
@@ -1464,14 +1470,21 @@ def test_flim_lif():
         assert not flim.is_bidirectional
         assert not flim.is_sinusoidal
         assert len(flim.timestamps) == 0
-        assert len(flim.memory_block.read()) == 15502568
+        if name == 'XLEF_TIF/FLIM_testdata.xlef':
+            # TIFF file is actually a LOF file
+            with pytest.raises(Exception):
+                flim.memory_block.read()
+        else:
+            assert len(flim.memory_block.read()) == 15502568
         with pytest.raises(NotImplementedError):
             flim.asxarray()
 
         intensity = lif.images['/Intensity']
         assert intensity in flim.child_images
         assert intensity.parent_image is flim
-        assert intensity.xml_element_smd is not None
+        if 'FLIM_testdata.lif' in name:
+            with pytest.warns(DeprecationWarning):
+                assert intensity.xml_element_smd is not None
         data = intensity.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float32
@@ -1480,7 +1493,9 @@ def test_flim_lif():
         mean = lif.images['Phasor Intensity$']
         assert mean in flim.child_images
         assert mean.parent_image is flim
-        assert mean.xml_element_smd is not None
+        if 'FLIM_testdata.lif' in name:
+            with pytest.warns(DeprecationWarning):
+                assert mean.xml_element_smd is not None
         data = mean.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
@@ -1489,17 +1504,21 @@ def test_flim_lif():
         real = lif.images['Phasor Real']
         assert real in flim.child_images
         assert real.parent_image is flim
-        assert real.xml_element_smd is not None
+        if 'FLIM_testdata.lif' in name:
+            with pytest.warns(DeprecationWarning):
+                assert real.xml_element_smd is not None
         data = real.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
         assert data.attrs['F16']['FactorF32ToF16'] == 1.0
 
-        real = lif.images['Fast Flim']
-        assert real in flim.child_images
-        assert real.parent_image is flim
-        assert real.xml_element_smd is not None
-        data = real.asxarray()
+        lifetime = lif.images['Fast Flim']
+        assert lifetime in flim.child_images
+        assert lifetime.parent_image is flim
+        if 'FLIM_testdata.lif' in name:
+            with pytest.warns(DeprecationWarning):
+                assert lifetime.xml_element_smd is not None
+        data = lifetime.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
         assert data.attrs['F16']['FactorF32ToF16'] == 1000000000.0
@@ -1507,12 +1526,76 @@ def test_flim_lif():
         mask = lif.images['Phasor Mask']
         assert mask in flim.child_images
         assert mask.parent_image is flim
-        assert mask.xml_element_smd is not None
+        if 'FLIM_testdata.lif' in name:
+            with pytest.warns(DeprecationWarning):
+                assert mask.xml_element_smd is not None
         data = mask.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.uint32
         gamma = data.attrs['ViewerScaling']['ChannelScalingInfo']['GammaValue']
         assert gamma == 1.0
+
+
+@pytest.mark.parametrize(
+    'name',
+    [
+        'RS_FALCON_10Volumes.lif',
+        'RS_FALCON_10Volumes.ome.tif/RS_FALCON_10Volumes.xlef',
+    ],
+)
+def test_flim_nd(name):
+    """Test multi-dimenional FLIM image formats."""
+    filename = DATA / name
+    with LifFile(filename) as lif:
+        str(lif)
+        assert len(lif.images) == 12
+        for image in lif.images:
+            str(image)
+
+        base = lif.images['Series006 Crop']
+
+        flim = lif.images['Series006$']
+        assert isinstance(flim, LifFlimImage)
+        # if name.endswith('.lif'):
+        assert flim.parent_image is base
+        assert len(flim.child_images) == 10
+        assert lif.uuid == '4441a913-c99c-11ee-b559-98597a5338f0'
+        assert flim.is_flim
+        # assert flim.xml_element_smd == flim.xml_element
+        assert flim.dtype == numpy.uint16
+        assert flim.sizes == {
+            'T': 10,
+            'Z': 10,
+            'C': 2,
+            'Y': 2048,
+            'X': 2048,
+            'H': 132,
+        }
+        assert pytest.approx(flim.coords['X'][-1]) == 6.07900899999e-05
+        assert pytest.approx(flim.coords['Y'][-1]) == 6.07900899999e-05
+        assert pytest.approx(flim.coords['Z'][-1]) == 2.0256059997000003e-06
+        assert pytest.approx(flim.coords['H'][-1]) == 1.270303030307e-08
+        assert flim.attrs['path'].endswith('/Series006 Crop/Series006')
+        assert flim.attrs['RawData']['LaserPulseFrequency'] == 78020000
+        assert flim.global_resolution == 1.281722635221738e-08
+        assert flim.tcspc_resolution == 9.696969697e-11
+        assert flim.number_bins_in_period == 132
+        assert flim.pixel_time == 1.8448e-08
+        assert flim.frequency == 78.02
+        assert flim.is_bidirectional
+        assert not flim.is_sinusoidal
+        assert len(flim.timestamps) == 0
+        assert len(flim.memory_block.read()) == 1004310116
+        with pytest.raises(NotImplementedError):
+            flim.asxarray()
+
+        lifetime = lif.images['Fast Flim']
+        assert lifetime in flim.child_images
+        assert lifetime.parent_image is flim
+        data = lifetime.asxarray()
+        assert data.shape == (10, 2, 10, 2048, 2048)
+        assert data.dtype == numpy.float16
+        assert data.attrs['F16']['FactorF32ToF16'] == 1000000000.0
 
 
 def test_flim_lof():
@@ -1538,7 +1621,8 @@ def test_flim_lof():
         assert isinstance(flim, LifFlimImage)
         assert flim.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
         assert flim.is_flim
-        assert flim.xml_element_smd == flim.xml_element
+        with pytest.warns(DeprecationWarning):
+            assert flim.xml_element_smd == flim.xml_element
         assert flim.dtype == numpy.uint16
         assert flim.sizes == {'C': 2, 'Y': 512, 'X': 512, 'H': 132}
         assert pytest.approx(flim.coords['X'][-1]) == 0.0011624999998359998
@@ -1605,7 +1689,7 @@ def test_output(output, asxarray):
         im = out
         assert not isinstance(im, numpy.memmap)
     elif asxarray:
-        assert isinstance(im.data, numpy.memmap)
+        assert isinstance(im.data, numpy.memmap), type(im.data)
     else:
         assert isinstance(im, numpy.memmap)
     assert im[:, 1, 200, 300].sum(axis=0) == 1364
@@ -1720,6 +1804,15 @@ def test_signal_from_lif():
             signal_from_lif(filename)
 
 
+@pytest.mark.parametrize('path', ['FLIM', 'flim'])
+@pytest.mark.parametrize('name', ['FLIM', 'flim'])
+def test_case_sensitive_path(path, name):
+    """Test case_sensitive_path function."""
+    assert case_sensitive_path(
+        DATA / f'case_sensitive/{path}_testdata/{name}_testdata.xlef'
+    ) == str(DATA / 'case_sensitive/FLIM_testdata/FLIM_testdata.xlef')
+
+
 def test_xml2dict():
     """Test xml2dict function."""
     xml = ElementTree.fromstring(
@@ -1763,13 +1856,12 @@ def test_glob(fname):
     fname = DATA / fname
     with LifFile(fname) as lif:
         str(lif)
-        if lif.format in {LifFileFormat.LOF, LifFileFormat.XLIF}:
-            one = lif.name not in {
-                'FrameProperties',
-                'IOManagerConfiguation',
-                '',
-            }
-            assert len(lif.images) == int(one)
+        if lif.format == LifFileFormat.LIFEXT:
+            assert len(lif.images) > 0
+        elif lif.name in {'FrameProperties', 'IOManagerConfiguation', ''}:
+            assert len(lif.images) == 0
+        elif lif.format == LifFileFormat.LOF:
+            assert len(lif.images) == 1
         else:
             assert len(lif.images) > 0
         if lif.format in {
@@ -1785,7 +1877,8 @@ def test_glob(fname):
             else:
                 image.asxarray()
             image.timestamps
-            image.xml_element_smd
+            with pytest.warns(DeprecationWarning):
+                image.xml_element_smd
 
 
 if __name__ == '__main__':
