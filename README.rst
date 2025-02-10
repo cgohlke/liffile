@@ -14,7 +14,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.8
+:Version: 2025.2.10
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -46,6 +46,15 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.2.10
+
+- Support case-sensitive file systems.
+- Support OMETiffBlock, AiviaTiffBlock, and other memory blocks.
+- Remove LifImageSeries.items and paths methods (breaking).
+- Deprecate LifImage.xml_element_smd.
+- Fix LifImage.parent_image and child_images properties for XML files.
+- Work around reading float16 blocks from uint16 OME-TIFF files.
 
 2025.2.8
 
@@ -113,9 +122,6 @@ Specifically, the following features are currently not supported:
 XLLF formats, image mosaics and pyramids, partial image reads,
 reading non-image data like FLIM/TCSPC, heterogeneous channel data types,
 discontiguous storage, and bit increments.
-
-The XLIF, XLEF, and XLCF formats may not work on case-sensitive file systems
-since file names are stored case-insensitive.
 
 The library has been tested with a limited number of version 2 files only.
 
