@@ -41,7 +41,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.8
+:Version: 2025.2.10
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -73,6 +73,15 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.2.10
+
+- Support case-sensitive file systems.
+- Support OMETiffBlock, AiviaTiffBlock, and other memory blocks.
+- Remove LifImageSeries.items and paths methods (breaking).
+- Deprecate LifImage.xml_element_smd.
+- Fix LifImage.parent_image and child_images properties for XML files.
+- Work around reading float16 blocks from uint16 OME-TIFF files.
 
 2025.2.8
 
@@ -141,9 +150,6 @@ XLLF formats, image mosaics and pyramids, partial image reads,
 reading non-image data like FLIM/TCSPC, heterogeneous channel data types,
 discontiguous storage, and bit increments.
 
-The XLIF, XLEF, and XLCF formats may not work on case-sensitive file systems
-since file names are stored case-insensitive.
-
 The library has been tested with a limited number of version 2 files only.
 
 The Leica image file formats are documented at:
@@ -192,12 +198,13 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.2.8'
+__version__ = '2025.2.10'
 
 __all__ = [
     '__version__',
     'imread',
     'logger',
+    'xml2dict',
     'LifFile',
     'LifFileError',
     'LifFileFormat',
@@ -325,7 +332,7 @@ class LifFileError(Exception):
 
 
 class LifFileFormat(enum.Enum):
-    """Leica file format."""
+    """Leica image file format."""
 
     LIF = 'LIF'
     """Leica image file."""
@@ -631,6 +638,7 @@ class LifFile:
                 continue
             filename = os.path.normpath(unquote(filename)).replace('\\', '/')
             filename = os.path.join(dirname, filename)
+            filename = case_sensitive_path(filename)
             children.append(
                 LifFile(filename, squeeze=self._squeeze, _parent=self)
             )
@@ -843,9 +851,15 @@ class LifImageABC(ABC):
         """Parent image, if any."""
         if '/' not in self.path:
             return None
+
+        parent = self.parent
+        while parent.parent is not None:
+            parent = parent.parent
+
         dirname = self.path.rsplit('/', 1)[0]
         if self.parent.format != LifFileFormat.LIFEXT or '/' in dirname:
-            return self.parent.images.find(f'^{dirname}$')
+            return parent.images.find(f'^{dirname}$')
+
         # LIFEXT root image references image in parent LIF file
         # via MemoryBlockID
         if self.parent.parent is None:
@@ -966,7 +980,11 @@ class LifImageABC(ABC):
             *(
                 f'{name}: {getattr(self, name)!r}'[:160]
                 for name in dir(self)
-                if not (name.startswith('_') or callable(getattr(self, name)))
+                if not (
+                    name.startswith('_')
+                    or name == 'xml_element_smd'
+                    or callable(getattr(self, name))
+                )
             ),
         )
 
@@ -981,6 +999,12 @@ class LifImage(LifImageABC):
 
     @property
     def xml_element_smd(self) -> ElementTree.Element | None:
+        # for backward compatibility with PhasorPy 0.4
+        warnings.warn(
+            'LifImage.xml_element_smd is deprecated.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         uuid = self.uuid
         return self.parent.xml_element.find(
             f'.//Element[@UniqueID="{uuid}"]../../Data/SingleMoleculeDetection'
@@ -1235,6 +1259,12 @@ class LifFlimImage(LifImageABC):
 
     @property
     def xml_element_smd(self) -> ElementTree.Element | None:
+        # for backward compatibility with PhasorPy 0.4
+        warnings.warn(
+            'LifImage.xml_element_smd is deprecated.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self.xml_element
 
     @cached_property
@@ -1395,26 +1425,25 @@ class LifImageSeries(Sequence[LifImageABC]):
         self._images = {}
         image: LifImageABC
 
-        if parent.format in {LifFileFormat.XLEF, LifFileFormat.XLCF}:
-            for child in parent.children:
-                for name, image in child.images.items():
-                    if self._parent.parent is not None:
-                        path = f'{parent.name}/{name}'
-                    else:
-                        path = name
-                    self._images[path] = image
-                    image.path = path
-            return
+        if parent.format not in {LifFileFormat.XLEF, LifFileFormat.XLCF}:
+            keepbase = parent.format == LifFileFormat.LIFEXT
+            for path, element in self._image_iter(parent.xml_element):
+                if not keepbase:
+                    path = path.split('/', 1)[-1]
+                if element.find('./Data/SingleMoleculeDetection') is None:
+                    image = LifImage(parent, element, path)
+                else:
+                    image = LifFlimImage(parent, element, path)
+                self._images[path] = image
 
-        keepbase = parent.format == LifFileFormat.LIFEXT
-        for path, element in LifImageSeries._image_iter(parent.xml_element):
-            if not keepbase:
-                path = path.split('/', 1)[-1]
-            if element.find('./Data/SingleMoleculeDetection') is None:
-                image = LifImage(parent, element, path)
-            else:
-                image = LifFlimImage(parent, element, path)
-            self._images[path] = image
+        for child in parent.children:
+            for image in child.images:
+                path = image.path
+                if parent.format != LifFileFormat.XLEF:
+                    path = f'{parent.name}/{path}'
+                self._images[path] = image
+                image.path = path
+        return
 
     @staticmethod
     def _image_iter(
@@ -1435,7 +1464,7 @@ class LifImageSeries(Sequence[LifImageABC]):
 
         for element in elements:
             name = element.attrib['Name']
-            if base_path == '' or base_path.endswith(name):
+            if base_path == '':
                 path = name
             else:
                 path = f'{base_path}/{name}'
@@ -1453,14 +1482,6 @@ class LifImageSeries(Sequence[LifImageABC]):
                 # sub images
                 yield from LifImageSeries._image_iter(element, path)
 
-    def paths(self) -> Iterator[str]:
-        """Return iterator over image paths."""
-        yield from self._images.keys()
-
-    def items(self) -> Iterator[tuple[str, LifImageABC]]:
-        """Return iterator over image paths and images."""
-        yield from self._images.items()
-
     def find(
         self, key: str, /, *, flags: int = re.IGNORECASE, default: Any = None
     ) -> LifImageABC | None:
@@ -1476,8 +1497,8 @@ class LifImageSeries(Sequence[LifImageABC]):
 
         """
         pattern = re.compile(key, flags=flags)
-        for path, image in self._images.items():
-            if pattern.search(path) is not None:
+        for image in self._images.values():
+            if pattern.search(image.path) is not None:
                 return image
         return default  # type: ignore[no-any-return]
 
@@ -1495,8 +1516,8 @@ class LifImageSeries(Sequence[LifImageABC]):
         """
         pattern = re.compile(key, flags=flags)
         images = []
-        for path, image in self._images.items():
-            if pattern.search(path) is not None:
+        for image in self._images.values():
+            if pattern.search(image.path) is not None:
                 images.append(image)
         return tuple(images)
 
@@ -1521,8 +1542,8 @@ class LifImageSeries(Sequence[LifImageABC]):
         if key in self._images:
             return self._images[key]
         pattern = re.compile(key, flags=re.IGNORECASE)
-        for path, image in self._images.items():
-            if pattern.search(path) is not None:
+        for image in self._images.values():
+            if pattern.search(image.path) is not None:
                 return image
         raise KeyError(f'image {key!r} not found')
 
@@ -1588,11 +1609,11 @@ class LifMemoryBlock:
             self.offset = -1
             self.size = int(memory.attrib['Size'])
             self.id = memory.get('MemoryBlockID', '')
-            blocks = memory.findall('./Frame')
-            if len(blocks) < 1:
-                blocks = memory.findall('./Block')
             frames = []
-            for block in blocks:
+            for block in memory:
+                # Frame, Block, OMETiffBlock, AiviaTiffBlock, ...
+                if 'File' not in block.attrib:
+                    continue
                 file = block.attrib['File']
                 offset = int(block.attrib['Offset'])
                 size = int(block.attrib['Size'])
@@ -1649,11 +1670,19 @@ class LifMemoryBlock:
         """Return memory block from file."""
         buffer: bytes | bytearray
 
+        if len(self.frames) == 1 and self.frames[0].file.endswith('.lof'):
+            # allow reading FLIM data from LOF file
+            path = case_sensitive_path(
+                os.path.join(self.parent.dirname, self.frames[0].file)
+            )
+            with LifFile(path) as lof:
+                data = lof.images[0].memory_block.read()
+            return data
         if len(self.frames) > 0:
             dirname = self.parent.dirname
             buffer = bytearray(self.size)
             for frame in self.frames:
-                im = frame.imread(os.path.join(dirname, frame.file))
+                im = frame.imread(dirname)
                 buffer[frame.offset : frame.offset + frame.size] = im.tobytes()
             return bytes(buffer)
 
@@ -1747,7 +1776,8 @@ class LifMemoryBlock:
         ):
             # avoid copy single frame to output array
             data = self.frames[0].imread(self.parent.dirname)
-            return data.reshape(shape).astype(dtype)
+            # create view in case float16 are stored as uint16 in TIFF
+            return data.view(dtype).reshape(shape)
 
         data = create_output(out, shape, dtype)
         if data.nbytes != nbytes:
@@ -1816,7 +1846,8 @@ class LifMemoryFrame:
         ext = os.path.splitext(self.file)[1].lower()
         if ext not in IMREAD:
             raise ValueError(f'unsupported file extension {ext!r}')
-        im = IMREAD[ext](os.path.join(dirname, self.file), **kwargs)
+        path = case_sensitive_path(os.path.join(dirname, self.file))
+        im = IMREAD[ext](path, **kwargs)
         if im.nbytes != self.size:
             if (
                 im.ndim == 3
@@ -1919,7 +1950,7 @@ if imagecodecs is not None:
     def imread_tif(filename: str, /, **kwargs: Any) -> NDArray[Any]:
         with open(filename, 'rb') as fh:
             data = fh.read()
-        return imagecodecs.tiff_decode(data, **kwargs)
+        return imagecodecs.tiff_decode(data, index=None, **kwargs)
 
     def imread_jpg(filename: str, /, **kwargs: Any) -> NDArray[Any]:
         with open(filename, 'rb') as fh:
@@ -2030,6 +2061,22 @@ def create_output(
         with tempfile.NamedTemporaryFile(dir=tempdir, suffix='.memmap') as fh:
             return numpy.memmap(fh, shape=shape, dtype=dtype, mode='w+')
     return numpy.memmap(out, shape=shape, dtype=dtype, mode='w+')
+
+
+def case_sensitive_path(path: str | os.PathLike[str], /) -> str:
+    """Return actual case of path."""
+    if os.path.exists(path):
+        return str(path)
+    path = os.path.abspath(path)
+    dirname, basename = os.path.split(path)
+    if dirname == path:
+        return dirname
+    dirname = case_sensitive_path(dirname)
+    basename = basename.lower()
+    for child in os.listdir(dirname):
+        if child.lower() == basename:
+            return os.path.join(dirname, child)
+    raise FileNotFoundError(f'{str(path)!r} not found')
 
 
 def xml2dict(
