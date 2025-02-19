@@ -10,7 +10,7 @@ from setuptools import Extension, setup
 buildnumber = ''
 
 
-def search(pattern, string, flags=0):
+def search(pattern: str, string: str, flags: int = 0) -> str:
     """Return first match of pattern in string."""
     match = re.search(pattern, string, flags)
     if match is None:
@@ -18,7 +18,7 @@ def search(pattern, string, flags=0):
     return match.groups()[0]
 
 
-def fix_docstring_examples(docstring):
+def fix_docstring_examples(docstring: str) -> str:
     """Return docstring with examples fixed for GitHub."""
     start = True
     indent = False
@@ -70,6 +70,19 @@ if 'sdist' in sys.argv:
         fh.write('BSD 3-Clause License\n\n')
         fh.write(license)
 
+    revisions = search(
+        r'(?:\r\n|\r|\n){2}(Revisions.*)- …',
+        readme,
+        re.MULTILINE | re.DOTALL,
+    ).strip()
+
+    with open('CHANGES.rst', encoding='utf-8') as fh:
+        old = fh.read()
+
+    old = old.split(revisions.splitlines()[-1])[-1]
+    with open('CHANGES.rst', 'w', encoding='utf-8') as fh:
+        fh.write(revisions.strip())
+        fh.write(old)
 
 ext_modules = [
     Extension(
