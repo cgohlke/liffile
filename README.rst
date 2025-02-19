@@ -14,7 +14,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.10
+:Version: 2025.2.20
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -42,10 +42,15 @@ This revision was tested with the following requirements and dependencies
   (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Xarray <https://pypi.org/project/xarray>`_ 2025.1.2 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.0 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.1.10 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.2.18 (optional)
 
 Revisions
 ---------
+
+2025.2.20
+
+- Rename LifFileFormat to LifFileType (breaking).
+- Rename LifFile.format to LifFile.type (breaking).
 
 2025.2.10
 
@@ -84,29 +89,9 @@ Revisions
 
 2025.2.2
 
-- Add LifFlimImage class.
-- Derive LifImage and LifFlimImage from LifImageABC.
-- Rename LifImage.guid property to uuid (breaking).
-- Add LifFile.uuid property.
+- …
 
-2025.1.31
-
-- Support LOF files.
-- Make LifFile.xml_header a function (breaking).
-
-2025.1.30
-
-- Remove LifFile.flim_rawdata (breaking).
-- Add index, guid, and xml_element_smd properties to LifImage.
-
-2025.1.26
-
-- Fix image coordinate values.
-- Prompt for file name if main is called without arguments.
-
-2025.1.25
-
-- Initial alpha release.
+Refer to the CHANGES file for older revisions.
 
 Notes
 -----
