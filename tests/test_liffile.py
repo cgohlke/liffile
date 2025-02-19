@@ -32,13 +32,14 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.2.10
+:Version: 2025.2.20
 
 """
 
 import datetime
 import glob
 import io
+import itertools
 import os
 import pathlib
 import re
@@ -54,7 +55,7 @@ from liffile import (
     FILE_EXTENSIONS,
     LifFile,
     LifFileError,
-    LifFileFormat,
+    LifFileType,
     LifFlimImage,
     LifImage,
     LifImageABC,
@@ -1010,7 +1011,7 @@ def test_lof():
     )
 
     with LifFile(filename, mode='r', squeeze=True) as lof:
-        assert lof.format == LifFileFormat.LOF
+        assert lof.type == LifFileType.LOF
         str(lof)
         assert lof.parent is None
         assert lof.filename == str(filename.name)
@@ -1112,7 +1113,7 @@ def test_xlif(name):
     )
 
     with LifFile(filename, mode='r', squeeze=True) as xlif:
-        assert xlif.format == LifFileFormat.XLIF
+        assert xlif.type == LifFileType.XLIF
         str(xlif)
         assert xlif.parent is None
         assert xlif.filehandle.closed
@@ -1211,7 +1212,7 @@ def test_xlif_lof(name):
     )
 
     with LifFile(filename, mode='r', squeeze=True) as xlif:
-        assert xlif.format == LifFileFormat.XLIF
+        assert xlif.type == LifFileType.XLIF
         str(xlif)
 
         xdata = xlif.images[0].asxarray(mode='r', out='memmap')
@@ -1245,7 +1246,7 @@ def test_xlef(name):
     filename = DATA / 'XLEFReaderForBioformats/Snail' / name
 
     with LifFile(filename, mode='r', squeeze=True) as xlef:
-        assert xlef.format == LifFileFormat.XLEF
+        assert xlef.type == LifFileType.XLEF
         assert xlef.parent is None
         str(xlef)
         assert xlef.filehandle.closed
@@ -1279,10 +1280,10 @@ def test_xlef(name):
         assert series[im.path] is im
         assert series[im.name + '$'] is im
         assert im.parent.parent.parent is xlef
-        assert im.parent.parent.format == LifFileFormat.XLCF
+        assert im.parent.parent.type == LifFileType.XLCF
         assert im.parent.parent.name == 'Series010_EDF001'
         assert len(im.parent.parent.children) == 2
-        assert im.parent.format == LifFileFormat.XLIF
+        assert im.parent.type == LifFileType.XLIF
         assert im.parent.name == 'EDF Image'
         assert im.name == 'EDF Image'
         assert im.path == 'Series010_EDF001/EDF Image'
@@ -1316,7 +1317,7 @@ def test_lifext():
         LifFile(filename + '.lif') as parent,
         LifFile(filename + '.lifext', _parent=parent) as lifext,
     ):
-        assert lifext.format == LifFileFormat.LIFEXT
+        assert lifext.type == LifFileType.LIFEXT
         str(lifext)
         assert lifext.parent is parent
         assert lifext.filename == 'XYZCS.lifext'
@@ -1608,7 +1609,7 @@ def test_flim_lof():
     )
     with LifFile(filename) as lof:
         str(lof)
-        assert lof.format == LifFileFormat.LOF
+        assert lof.type == LifFileType.LOF
         assert lof.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
         assert len(lof.images) == 1
         memblock = lof.memory_blocks['MemBlock_1643']
@@ -1707,7 +1708,7 @@ def test_lof_no_image():
     )
     with LifFile(filename) as lof:
         str(lof)
-        assert lof.format == LifFileFormat.LOF
+        assert lof.type == LifFileType.LOF
         assert len(lof.images) == 0
         memblock = lof.memory_blocks['MemBlock_1642']
         assert len(memblock.read()) == memblock.size
@@ -1843,11 +1844,10 @@ def test_xml2dict():
 
 @pytest.mark.parametrize(
     'fname',
-    glob.glob('**/*.lif', root_dir=DATA, recursive=True)
-    + glob.glob('**/*.lof', root_dir=DATA, recursive=True)
-    + glob.glob('**/*.xlif', root_dir=DATA, recursive=True)
-    + glob.glob('**/*.xlef', root_dir=DATA, recursive=True)
-    + glob.glob('**/*.lifext', root_dir=DATA, recursive=True),
+    itertools.chain.from_iterable(
+        glob.glob(f'**/*{ext}', root_dir=DATA, recursive=True)
+        for ext in FILE_EXTENSIONS.keys()
+    ),
 )
 def test_glob(fname):
     """Test read all LIF files."""
@@ -1856,17 +1856,18 @@ def test_glob(fname):
     fname = DATA / fname
     with LifFile(fname) as lif:
         str(lif)
-        if lif.format == LifFileFormat.LIFEXT:
+        if lif.type == LifFileType.LIFEXT:
             assert len(lif.images) > 0
         elif lif.name in {'FrameProperties', 'IOManagerConfiguation', ''}:
             assert len(lif.images) == 0
-        elif lif.format == LifFileFormat.LOF:
+        elif lif.type == LifFileType.LOF:
             assert len(lif.images) == 1
         else:
             assert len(lif.images) > 0
-        if lif.format in {
-            LifFileFormat.XLIF,
-            LifFileFormat.XLEF,
+        if lif.type in {
+            LifFileType.XLIF,
+            LifFileType.XLEF,
+            LifFileType.XLCF,
         } and '8--Proj_LOF001' in str(fname):
             pytest.xfail(reason='cannot read image from old-style LOF')
         for image in lif.images:
