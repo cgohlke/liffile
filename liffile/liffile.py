@@ -41,7 +41,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.10
+:Version: 2025.2.20
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -69,10 +69,15 @@ This revision was tested with the following requirements and dependencies
   (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Xarray <https://pypi.org/project/xarray>`_ 2025.1.2 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.0 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.1.10 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.2.18 (optional)
 
 Revisions
 ---------
+
+2025.2.20
+
+- Rename LifFileFormat to LifFileType (breaking).
+- Rename LifFile.format to LifFile.type (breaking).
 
 2025.2.10
 
@@ -111,29 +116,9 @@ Revisions
 
 2025.2.2
 
-- Add LifFlimImage class.
-- Derive LifImage and LifFlimImage from LifImageABC.
-- Rename LifImage.guid property to uuid (breaking).
-- Add LifFile.uuid property.
+- …
 
-2025.1.31
-
-- Support LOF files.
-- Make LifFile.xml_header a function (breaking).
-
-2025.1.30
-
-- Remove LifFile.flim_rawdata (breaking).
-- Add index, guid, and xml_element_smd properties to LifImage.
-
-2025.1.26
-
-- Fix image coordinate values.
-- Prompt for file name if main is called without arguments.
-
-2025.1.25
-
-- Initial alpha release.
+Refer to the CHANGES file for older revisions.
 
 Notes
 -----
@@ -198,7 +183,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.2.10'
+__version__ = '2025.2.20'
 
 __all__ = [
     '__version__',
@@ -207,7 +192,7 @@ __all__ = [
     'xml2dict',
     'LifFile',
     'LifFileError',
-    'LifFileFormat',
+    'LifFileType',
     'LifImage',
     'LifFlimImage',
     'LifImageABC',
@@ -331,8 +316,8 @@ class LifFileError(Exception):
     """Exception to indicate invalid Leica Image File structure."""
 
 
-class LifFileFormat(enum.Enum):
-    """Leica image file format."""
+class LifFileType(enum.Enum):
+    """Leica image file type."""
 
     LIF = 'LIF'
     """Leica image file."""
@@ -383,6 +368,9 @@ class LifFile:
 
     """
 
+    type: LifFileType
+    """Type of Leica image file."""
+
     version: int
     """File version."""
 
@@ -391,9 +379,6 @@ class LifFile:
 
     uuid: str | None
     """Unique identifier of file, if any."""
-
-    format: LifFileFormat
-    """Format of Leica image file."""
 
     xml_element: ElementTree.Element
     """XML header root element."""
@@ -424,7 +409,7 @@ class LifFile:
                 if mode[-1:] == 'b':
                     mode = mode[:-1]  # type: ignore[assignment]
                 if mode not in {'r', 'r+'}:
-                    raise ValueError(f'invalid mode {mode!r}')
+                    raise ValueError(f'invalid {mode=!r}')
             self._path = os.path.abspath(file)
             self._close = True
             self._fh = open(self._path, mode + 'b')
@@ -437,7 +422,7 @@ class LifFile:
 
         self._parent = _parent
         self._squeeze = bool(squeeze)
-        self.format = LifFileFormat.LIF
+        self.type = LifFileType.LIF
         self.version = 0
         self.name = ''
         self.uuid = None
@@ -451,10 +436,10 @@ class LifFile:
             self.close()
             raise
 
-        if self._close and self.format in {
-            LifFileFormat.XLIF,
-            LifFileFormat.XLEF,
-            LifFileFormat.XLCF,
+        if self._close and self.type in {
+            LifFileType.XLIF,
+            LifFileType.XLEF,
+            LifFileType.XLCF,
         }:
             try:
                 self._fh.close()
@@ -472,13 +457,13 @@ class LifFile:
 
         if id0 in XML_CODEC:
             # XML: XLEF, XLCF, or XLIF
-            self.format = LifFileFormat.XLIF
+            self.type = LifFileType.XLIF
             self._xml_header = (0, -1)
             fh.seek(0)
             xml_header = fh.read().decode(XML_CODEC[id0])
 
         elif id0 == 0x70 and id1 == 0x2A:  # or size != 2 * strlen + 5
-            self.format = LifFileFormat.LIF
+            self.type = LifFileType.LIF
             self._xml_header = (fh.tell(), strlen * 2)
             xml_header = fh.read(strlen * 2).decode('utf-16-le')
 
@@ -489,7 +474,7 @@ class LifFile:
             )
 
         if xml_header == 'LMS_Object_File':
-            self.format = LifFileFormat.LOF
+            self.type = LifFileType.LOF
             # read memory block
             try:
                 id0, ver0, id1, ver1 = struct.unpack('<BIBI', fh.read(10))
@@ -517,14 +502,14 @@ class LifFile:
             xml_header = fh.read(xmlsize * 2).decode('utf-16-le')
 
         elif xml_header.startswith('<LMSDataContainerEnhancedHeader'):
-            self.format = LifFileFormat.LIFEXT
+            self.type = LifFileType.LIFEXT
 
         self.xml_element = ElementTree.fromstring(xml_header)
         del xml_header
 
         element = self.xml_element.find('./Element')
         if element is None:
-            if self.format != LifFileFormat.LIFEXT:
+            if self.type != LifFileType.LIFEXT:
                 logger().warning(f'{self!r} Element element not found in XML')
         else:
             self.name = element.attrib.get('Name', self.name)
@@ -539,11 +524,11 @@ class LifFile:
         try:
             self.version = int(self.xml_element.attrib['Version'])
         except KeyError:
-            if not self.format == LifFileFormat.LOF:
+            if not self.type == LifFileType.LOF:
                 raise KeyError('Version attribute not found in XML')
 
         # add memory blocks
-        if self.format == LifFileFormat.LOF:
+        if self.type == LifFileType.LOF:
             # LOF files only contain a single memory block without id.
             # Any id would work.
             # However, try to preserve original id from XML metadata.
@@ -562,7 +547,7 @@ class LifFile:
             memblock.id = memblock_id  # LOF memory blocks don't have id
             self.memory_blocks[memblock.id] = memblock
 
-        elif self.format in {LifFileFormat.LIF, LifFileFormat.LIFEXT}:
+        elif self.type in {LifFileType.LIF, LifFileType.LIFEXT}:
             while True:
                 try:
                     memblock = LifMemoryBlock(self)
@@ -570,21 +555,21 @@ class LifFile:
                     break
                 self.memory_blocks[memblock.id] = memblock
 
-        elif self.format in {
-            LifFileFormat.XLIF,
-            LifFileFormat.XLEF,
-            LifFileFormat.XLCF,
+        elif self.type in {
+            LifFileType.XLIF,
+            LifFileType.XLEF,
+            LifFileType.XLCF,
         }:
             assert element is not None
             if element.find('./Data/Collection') is not None:
-                self.format = LifFileFormat.XLCF
+                self.type = LifFileType.XLCF
             elif element.find('./Data/Experiment') is not None:
-                self.format = LifFileFormat.XLEF
+                self.type = LifFileType.XLEF
             memblock = LifMemoryBlock(self)
             self.memory_blocks[memblock.id] = memblock
 
         else:
-            raise ValueError(f'unsupported format {self.format!r}')
+            raise ValueError(f'unsupported file type={self.type!r}')
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -695,7 +680,7 @@ class LifFile:
         return indent(
             repr(self),
             f'path: {self._path}',
-            f'format: {self.format}',
+            f'type: {self.type}',
             f'uuid: {self.uuid}',
             f'datetime: {self.datetime}',
             indent(
@@ -857,7 +842,7 @@ class LifImageABC(ABC):
             parent = parent.parent
 
         dirname = self.path.rsplit('/', 1)[0]
-        if self.parent.format != LifFileFormat.LIFEXT or '/' in dirname:
+        if self.parent.type != LifFileType.LIFEXT or '/' in dirname:
             return parent.images.find(f'^{dirname}$')
 
         # LIFEXT root image references image in parent LIF file
@@ -882,7 +867,7 @@ class LifImageABC(ABC):
     @cached_property
     def memory_block(self) -> LifMemoryBlock:
         """Memory block containing image data."""
-        if self.parent.format in {LifFileFormat.LOF, LifFileFormat.XLIF}:
+        if self.parent.type in {LifFileType.LOF, LifFileType.XLIF}:
             # XLIF and LOF files contain one memory block
             return self.parent.memory_blocks[
                 tuple(self.parent.memory_blocks.keys())[0]
@@ -1164,7 +1149,7 @@ class LifImage(LifImageABC):
     @cached_property
     def attrs(self) -> dict[str, Any]:
         path = self.path
-        if self.parent.format == LifFileFormat.LIF:
+        if self.parent.type == LifFileType.LIF:
             path = self.parent.name + '/' + path
         attrs = {'path': path}
         attrs.update(
@@ -1425,8 +1410,8 @@ class LifImageSeries(Sequence[LifImageABC]):
         self._images = {}
         image: LifImageABC
 
-        if parent.format not in {LifFileFormat.XLEF, LifFileFormat.XLCF}:
-            keepbase = parent.format == LifFileFormat.LIFEXT
+        if parent.type not in {LifFileType.XLEF, LifFileType.XLCF}:
+            keepbase = parent.type == LifFileType.LIFEXT
             for path, element in self._image_iter(parent.xml_element):
                 if not keepbase:
                     path = path.split('/', 1)[-1]
@@ -1439,7 +1424,7 @@ class LifImageSeries(Sequence[LifImageABC]):
         for child in parent.children:
             for image in child.images:
                 path = image.path
-                if parent.format != LifFileFormat.XLEF:
+                if parent.type != LifFileType.XLEF:
                     path = f'{parent.name}/{path}'
                 self._images[path] = image
                 image.path = path
@@ -1599,10 +1584,10 @@ class LifMemoryBlock:
         self.size = 0
         self.frames = ()
 
-        if parent.format in {LifFileFormat.XLEF, LifFileFormat.XLCF}:
+        if parent.type in {LifFileType.XLEF, LifFileType.XLCF}:
             return
 
-        if parent.format == LifFileFormat.XLIF:
+        if parent.type == LifFileType.XLIF:
             memory = parent.xml_element.find('./Element/Memory')
             if memory is None:
                 raise ValueError('Memory element not found in XML')
@@ -1622,9 +1607,9 @@ class LifMemoryBlock:
             self.frames = tuple(frames)
             return
 
-        if parent.format == LifFileFormat.LOF:
+        if parent.type == LifFileType.LOF:
             fmtstr = '<BQ'
-        elif parent.version == 2 or parent.format == LifFileFormat.LIFEXT:
+        elif parent.version == 2 or parent.type == LifFileType.LIFEXT:
             fmtstr = '<IIBQBI'
         elif parent.version == 1:
             fmtstr = '<IIBIBI'
@@ -1637,7 +1622,7 @@ class LifMemoryBlock:
         if len(buffer) != size:
             raise OSError
 
-        if parent.format == LifFileFormat.LOF:
+        if parent.type == LifFileType.LOF:
             self.id = 'MemBlock_0'  # updated in LifFile._init
             id0, size = struct.unpack(fmtstr, buffer)
             if id0 != 0x2A:
@@ -1645,7 +1630,7 @@ class LifMemoryBlock:
                     f'corrupted LOF memory block ({id0=:02X} != 0x2A)'
                 )
         else:
-            # parent.format == LifFileFormat.LIF:
+            # parent.type == LifFileType.LIF:
             id0, _, id1, size1, id2, strlen = struct.unpack(fmtstr, buffer)
             if id0 != 0x70 or id1 != 0x2A or id2 != 0x2A:
                 raise LifFileError(
@@ -1700,7 +1685,7 @@ class LifMemoryBlock:
             raise ValueError(f'{buffer.nbytes} != {self.size=}')
         buffer = buffer.reshape(-1).view(numpy.uint8)
 
-        if self.parent.format == LifFileFormat.XLIF:
+        if self.parent.type == LifFileType.XLIF:
             for frame in self.frames:
                 im = frame.imread(self.parent.dirname)
                 im = im.reshape(-1).view(numpy.uint8)
@@ -1771,7 +1756,7 @@ class LifMemoryBlock:
 
         if (
             out is None
-            and self.parent.format == LifFileFormat.XLIF
+            and self.parent.type == LifFileType.XLIF
             and len(self.frames) == 1
         ):
             # avoid copy single frame to output array
@@ -2031,13 +2016,13 @@ XML_CODEC = {
 
 
 FILE_EXTENSIONS = {
-    '.lif': LifFile,
-    '.lof': LifFile,
-    '.xlif': LifFile,
-    '.xlef': LifFile,
-    '.xlcf': LifFile,
-    # '.xllf': LifFile,
-    # '.lifext': LifFileExt,
+    '.lif': LifFileType.LIF,
+    '.lof': LifFileType.LOF,
+    '.xlif': LifFileType.XLIF,
+    '.xlef': LifFileType.XLEF,
+    '.xlcf': LifFileType.XLCF,
+    # '.xllf': LifFileType.XLLF,
+    '.lifext': LifFileType.LIFEXT,
 }
 """Supported file extensions of Leica image files."""
 
