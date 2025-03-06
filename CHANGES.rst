@@ -1,6 +1,10 @@
 Revisions
 ---------
 
+2025.3.6
+
+- Support stride-aligned RGB images.
+
 2025.2.20
 
 - Rename LifFileFormat to LifFileType (breaking).
