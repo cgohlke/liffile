@@ -41,7 +41,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.20
+:Version: 2025.3.6
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -64,15 +64,19 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.9, 3.13.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.2.2
+- `NumPy <https://pypi.org/project/numpy>`_ 2.2.3
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2024.12.30
   (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Xarray <https://pypi.org/project/xarray>`_ 2025.1.2 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.0 (optional)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.1 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.2.18 (optional)
 
 Revisions
 ---------
+
+2025.3.6
+
+- Support stride-aligned RGB images.
 
 2025.2.20
 
@@ -183,7 +187,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.2.20'
+__version__ = '2025.3.6'
 
 __all__ = [
     '__version__',
@@ -744,6 +748,8 @@ class LifImageABC(ABC):
     path: str
     """Path of image in image tree."""
 
+    _shape_stored: tuple[int, ...] | None
+
     def __init__(
         self,
         parent: LifFile,
@@ -754,6 +760,7 @@ class LifImageABC(ABC):
         self.parent = parent
         self.xml_element = xml_element
         self.path = path
+        self._shape_stored = None
 
     @property
     def is_flim(self) -> bool:
@@ -1103,28 +1110,52 @@ class LifImage(LifImageABC):
                 if not squeeze or dim.number_elements > 1
             }
 
-        # insert channels where other dimensions are discontiguous
-        # TODO: verify with channel BytesInc
         sizes = {}
+        sizes_stored = {}
         stride = self.dtype.itemsize
         ch = 0
         for i, dim in enumerate(reversed(self._dimensions)):
             if squeeze and dim.number_elements < 2:
                 continue
             if stride != dim.bytes_inc:
-                assert dim.bytes_inc % stride == 0
-                size = dim.bytes_inc // stride
-                ax = 'S' if i == 0 else 'C' if 'C' not in sizes else f'C{ch}'
-                if ax != 'S':
-                    ch += 1
-                sizes[ax] = size
-                assert nchannels % size == 0
-                nchannels //= size
+                if dim.bytes_inc % stride == 0:
+                    # insert channels where other dimensions are discontiguous
+                    # TODO: verify with channel BytesInc
+                    size = dim.bytes_inc // stride
+                    if i == 0:
+                        ax = 'S'
+                    else:
+                        ax = 'C' if 'C' not in sizes else f'C{ch}'
+                        ch += 1
+                    sizes[ax] = size
+                    assert nchannels % size == 0
+                    nchannels //= size
+                elif (
+                    dim.label == 'Y'
+                    and 'X' in sizes
+                    and 'S' in sizes
+                    and dim.bytes_inc % (sizes['S'] * self.dtype.itemsize) == 0
+                ):
+                    # account for stride-aligned RGB rows
+                    size = dim.bytes_inc // (sizes['S'] * self.dtype.itemsize)
+                    sizes_stored['X'] = size
+                    assert sizes_stored['X'] > sizes['X']
+                else:
+                    raise ValueError(
+                        f'{stride=} % {dim.bytes_inc=} '
+                        f'== {dim.bytes_inc % stride} != 0'
+                    )
             sizes[dim.label] = dim.number_elements
             stride = dim.number_elements * dim.bytes_inc
         if nchannels > 1:
             ax = 'C' if 'C' not in sizes else f'C{ch}'
             sizes[ax] = nchannels
+
+        if sizes_stored:
+            self._shape_stored = tuple(
+                sizes_stored.get(dim, size)
+                for dim, size in reversed(sizes.items())
+            )
 
         return dict(reversed(list(sizes.items())))
 
@@ -1220,9 +1251,16 @@ class LifImage(LifImageABC):
                 Image data as numpy array. RGB samples may not be contiguous.
 
         """
-        data = self.memory_block.read_array(
-            self.shape, self.dtype, mode=mode, out=out
-        )
+        if self._shape_stored is None:
+            data = self.memory_block.read_array(
+                self.shape, self.dtype, mode=mode, out=out
+            )
+        else:
+            # TODO: this does not work with user-provided output array
+            data = self.memory_block.read_array(
+                self._shape_stored, self.dtype, mode=mode, out=out
+            )
+            data = data[tuple(slice(size) for size in self.shape)]
         if (
             len(self.memory_block.frames) == 0  # disable for frames
             and self.sizes.get('S', 0) == 3
