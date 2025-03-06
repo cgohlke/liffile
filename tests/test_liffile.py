@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.2.20
+:Version: 2025.3.6
 
 """
 
@@ -1667,6 +1667,36 @@ def test_rgb():
         assert image.sizes == {'Y': 1536, 'X': 2048, 'S': 3}
         data = image.asarray()
         assert data.sum(dtype=numpy.uint64) == 86724120
+
+
+def test_rgb_pad():
+    """Test read RGB with padding at end of rows."""
+    filename = DATA / 'image.sc_108815/Cont HIF alpha.lif'
+    with LifFile(filename) as lif:
+        assert len(lif.images) == 20
+        for i, image in enumerate(lif.images):
+            assert image.dtype == numpy.uint8
+            if i % 4 == 0:
+                assert image.sizes == {'C': 2, 'Y': 2048, 'X': 2048}
+                data = image.asxarray()
+            elif i == 9:
+                assert image.sizes == {'Y': 1075, 'X': 1075, 'S': 3}
+                data = image.asxarray()
+                assert data.shape == (1075, 1075, 3)
+            else:
+                assert image.sizes == {'Y': 531, 'X': 531, 'S': 3}
+                data = image.asxarray()
+                assert data.shape == (531, 531, 3)
+
+        # out parameter doesn't work as expected
+        out = numpy.zeros((531, 532, 3), numpy.uint8)
+        data = lif.images[1].asarray(out=out)
+        assert data.shape == (531, 531, 3)
+        assert data.sum(dtype=numpy.uint64) == 676414
+
+        with pytest.raises(ValueError):
+            out = numpy.zeros((531, 531, 3), numpy.uint8)
+            lif.images[1].asarray(out=out)
 
 
 @pytest.mark.parametrize('asxarray', [False, True])
