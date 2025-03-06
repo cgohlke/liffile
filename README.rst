@@ -14,7 +14,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.2.20
+:Version: 2025.3.6
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -37,15 +37,19 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.9, 3.13.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.2.2
+- `NumPy <https://pypi.org/project/numpy>`_ 2.2.3
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2024.12.30
   (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Xarray <https://pypi.org/project/xarray>`_ 2025.1.2 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.0 (optional)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.1 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.2.18 (optional)
 
 Revisions
 ---------
+
+2025.3.6
+
+- Support stride-aligned RGB images.
 
 2025.2.20
 
