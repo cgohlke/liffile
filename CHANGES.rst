@@ -1,6 +1,10 @@
 Revisions
 ---------
 
+2025.3.8
+
+- Support LOF files without LMSDataContainerHeader XML element.
+
 2025.3.6
 
 - Support stride-aligned RGB images.
