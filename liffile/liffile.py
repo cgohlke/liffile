@@ -41,7 +41,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.3.6
+:Version: 2025.3.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -73,6 +73,10 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.3.8
+
+- Support LOF files without LMSDataContainerHeader XML element.
 
 2025.3.6
 
@@ -187,7 +191,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.3.6'
+__version__ = '2025.3.8'
 
 __all__ = [
     '__version__',
@@ -505,6 +509,24 @@ class LifFile:
             self._xml_header = (fh.tell(), xmlsize * 2)
             xml_header = fh.read(xmlsize * 2).decode('utf-16-le')
 
+            if xml_header.startswith('<Data>'):
+                # Some XML found in (older?) LOF files do not contain a
+                # versioned <LMSDataContainerHeader> element required by
+                # the LOF specification, but instead start with <Data><Image>
+                # elements.
+                if self._path:
+                    name = os.path.splitext(os.path.basename(self._path))[0]
+                elif hasattr(self._fh, 'name') and self._fh.name:
+                    name = os.path.splitext(os.path.basename(self._fh.name))[0]
+                else:
+                    name = 'Unnamed'
+                xml_header = (
+                    '<LMSDataContainerHeader Version="2">'
+                    f'<Element Name="{name}">'  # no UniqueID
+                    f'{xml_header}'
+                    '</Element></LMSDataContainerHeader>'
+                )
+
         elif xml_header.startswith('<LMSDataContainerEnhancedHeader'):
             self.type = LifFileType.LIFEXT
 
@@ -518,12 +540,6 @@ class LifFile:
         else:
             self.name = element.attrib.get('Name', self.name)
             self.uuid = element.attrib.get('UniqueID')
-
-        # TODO: some XML found in (older?) LOF files do not contain a
-        # versioned <LMSDataContainerHeader> element required by the
-        # LOF specification, but instead start with <Data><Image> elements.
-        # For now, let those files pass without exception, albeit with
-        # an empty image series.
 
         try:
             self.version = int(self.xml_element.attrib['Version'])
