@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.3.6
+:Version: 2025.3.8
 
 """
 
@@ -1094,7 +1094,7 @@ def test_lof():
 @pytest.mark.parametrize(
     'name',
     [
-        # '16_18--Proj_LOF001',  # old-style LOF
+        '16_18--Proj_LOF001',  # old-style LOF
         '19_37--Proj_TIF_uncompressed001',
         '20_09--Proj_TIF_lossless001',
         '20_38--Proj_BMP001',
@@ -1744,8 +1744,9 @@ def test_lof_no_image():
         assert len(memblock.read()) == memblock.size
 
 
-def test_lof_defective(caplog):
-    """Test LOF file with no invalid/outdated XML."""
+def test_lof_oldstyle(caplog):
+    """Test LOF file without LMSDataContainerHeader XML elementL."""
+    # the file is formally tested in test_xlif
     filename = (
         DATA
         / 'Leica_Image_File_Format Examples_2015_08'
@@ -1753,12 +1754,15 @@ def test_lof_defective(caplog):
         / 'ImageXYC1.lof'
     )
     with LifFile(filename) as lof:
-        assert 'Element element not found in XML' in caplog.text
+        assert 'Element element not found in XML' not in caplog.text
         str(lof)
-        assert lof.version == 0
-        assert len(lof.images) == 0
+        assert lof.version == 2
+        assert len(lof.images) == 1
         assert lof.memory_blocks['MemBlock_0'].offset == 62
         assert lof.xml_header().startswith('<Data>')
+        image = lof.images[0]
+        assert image.name == 'ImageXYC1'
+        assert image.uuid is None
 
 
 def test_phasor_from_lif():
@@ -1894,12 +1898,6 @@ def test_glob(fname):
             assert len(lif.images) == 1
         else:
             assert len(lif.images) > 0
-        if lif.type in {
-            LifFileType.XLIF,
-            LifFileType.XLEF,
-            LifFileType.XLCF,
-        } and '8--Proj_LOF001' in str(fname):
-            pytest.xfail(reason='cannot read image from old-style LOF')
         for image in lif.images:
             str(image)
             if image.is_flim:
