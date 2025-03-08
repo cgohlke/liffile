@@ -14,7 +14,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.3.6
+:Version: 2025.3.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -46,6 +46,10 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2025.3.8
+
+- Support LOF files without LMSDataContainerHeader XML element.
 
 2025.3.6
 
