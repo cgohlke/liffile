@@ -100,7 +100,7 @@ ext_modules = [
 setup(
     name='liffile',
     version=version,
-    license='BSD',
+    license='BSD-3-Clause',
     description=description,
     long_description=readme,
     long_description_content_type='text/x-rst',
@@ -125,7 +125,6 @@ setup(
     platforms=['any'],
     classifiers=[
         'Development Status :: 3 - Alpha',
-        'License :: OSI Approved :: BSD License',
         'Intended Audience :: Science/Research',
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
