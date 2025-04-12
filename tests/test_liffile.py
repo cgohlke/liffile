@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.3.8
+:Version: 2025.4.12
 
 """
 
@@ -1770,8 +1770,7 @@ def test_phasor_from_lif():
     from phasorpy.io import phasor_from_lif
 
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
-    with pytest.warns(DeprecationWarning):
-        mean, real, imag, attrs = phasor_from_lif(filename)
+    mean, real, imag, attrs = phasor_from_lif(filename)
     for data in (mean, real, imag):
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float32
@@ -1779,10 +1778,9 @@ def test_phasor_from_lif():
     assert 'harmonic' not in attrs
 
     # select series
-    with pytest.warns(DeprecationWarning):
-        mean1, real1, imag1, attrs = phasor_from_lif(
-            filename, series='FLIM Compressed'
-        )
+    mean1, real1, imag1, attrs = phasor_from_lif(
+        filename, image='FLIM Compressed'
+    )
     assert_array_equal(mean1, mean)
 
     # TODO: file does not contain FLIM raw metadata
@@ -1793,8 +1791,7 @@ def test_phasor_from_lif():
     # file does not contain FLIM data
     filename = DATA / 'ScanModesExamples.lif'
     with pytest.raises(ValueError):
-        with pytest.warns(DeprecationWarning):
-            phasor_from_lif(filename)
+        phasor_from_lif(filename)
 
 
 def test_signal_from_lif():
@@ -1802,16 +1799,14 @@ def test_signal_from_lif():
     from phasorpy.io import signal_from_lif
 
     filename = DATA / 'ScanModesExamples.lif'
-    with pytest.warns(DeprecationWarning):
-        signal = signal_from_lif(filename)
+    signal = signal_from_lif(filename)
     assert signal.dims == ('C', 'Y', 'X')
     assert signal.shape == (9, 128, 128)
     assert signal.dtype == numpy.uint8
     assert_allclose(signal.coords['C'].data[[0, 1]], [560.0, 580.0])
 
     # select series
-    with pytest.warns(DeprecationWarning):
-        signal = signal_from_lif(filename, series='XYZLambdaT')
+    signal = signal_from_lif(filename, image='XYZLambdaT')
     assert signal.dims == ('T', 'C', 'Z', 'Y', 'X')
     assert signal.shape == (7, 9, 5, 128, 128)
     assert_allclose(signal.coords['C'].data[[0, 1]], [560.0, 580.0])
@@ -1821,22 +1816,19 @@ def test_signal_from_lif():
     )
 
     # select excitation
-    with pytest.warns(DeprecationWarning):
-        signal = signal_from_lif(filename, dim='Λ')
+    signal = signal_from_lif(filename, dim='Λ')
     assert signal.dims == ('C', 'Y', 'X')
     assert signal.shape == (10, 128, 128)
     assert_allclose(signal.coords['C'].data[[0, 1]], [470.0, 492.0])
 
     # series does not contain dim
     with pytest.raises(ValueError):
-        with pytest.warns(DeprecationWarning):
-            signal_from_lif(filename, series='XYZLambdaT', dim='Λ')
+        signal_from_lif(filename, image='XYZLambdaT', dim='Λ')
 
     # file does not contain hyperspectral signal
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
     with pytest.raises(ValueError):
-        with pytest.warns(DeprecationWarning):
-            signal_from_lif(filename)
+        signal_from_lif(filename)
 
 
 @pytest.mark.parametrize('path', ['FLIM', 'flim'])
@@ -1844,7 +1836,7 @@ def test_signal_from_lif():
 def test_case_sensitive_path(path, name):
     """Test case_sensitive_path function."""
     assert case_sensitive_path(
-        DATA / f'case_sensitive/{path}_testdata/{name}_testdata.xlef'
+        str(DATA / f'case_sensitive/{path}_testdata/{name}_testdata.xlef')
     ) == str(DATA / 'case_sensitive/FLIM_testdata/FLIM_testdata.xlef')
 
 
