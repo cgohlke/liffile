@@ -41,7 +41,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD 3-Clause
-:Version: 2025.3.8
+:Version: 2025.4.12
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -63,16 +63,20 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.9, 3.13.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.2.3
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2024.12.30
+- `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.10, 3.13.3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.2.4
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.3.30
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.1.2 (recommended)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.3.1 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.1 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.2.18 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.3.30 (optional)
 
 Revisions
 ---------
+
+2025.4.12
+
+- Improve case_sensitive_path function.
 
 2025.3.8
 
@@ -191,7 +195,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.3.8'
+__version__ = '2025.4.12'
 
 __all__ = [
     '__version__',
@@ -222,7 +226,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import cached_property
+from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, final, overload
 from urllib.parse import unquote
 from xml.etree import ElementTree
@@ -643,7 +647,8 @@ class LifFile:
                 continue
             filename = os.path.normpath(unquote(filename)).replace('\\', '/')
             filename = os.path.join(dirname, filename)
-            filename = case_sensitive_path(filename)
+            if not os.path.exists(filename):
+                filename = case_sensitive_path(filename)
             children.append(
                 LifFile(filename, squeeze=self._squeeze, _parent=self)
             )
@@ -1711,9 +1716,9 @@ class LifMemoryBlock:
 
         if len(self.frames) == 1 and self.frames[0].file.endswith('.lof'):
             # allow reading FLIM data from LOF file
-            path = case_sensitive_path(
-                os.path.join(self.parent.dirname, self.frames[0].file)
-            )
+            path = os.path.join(self.parent.dirname, self.frames[0].file)
+            if not os.path.exists(path):
+                path = case_sensitive_path(path)
             with LifFile(path) as lof:
                 data = lof.images[0].memory_block.read()
             return data
@@ -1885,7 +1890,9 @@ class LifMemoryFrame:
         ext = os.path.splitext(self.file)[1].lower()
         if ext not in IMREAD:
             raise ValueError(f'unsupported file extension {ext!r}')
-        path = case_sensitive_path(os.path.join(dirname, self.file))
+        path = os.path.join(dirname, self.file)
+        if not os.path.exists(path):
+            path = case_sensitive_path(path)
         im = IMREAD[ext](path, **kwargs)
         if im.nbytes != self.size:
             if (
@@ -1902,7 +1909,7 @@ class LifMemoryFrame:
     def __repr__(self) -> str:
         return (
             f'<{self.__class__.__name__} {self.file!r} '
-            f'offset={self.offset} size={self.size} uiud={self.uuid!r}>'
+            f'offset={self.offset} size={self.size} uuid={self.uuid!r}>'
         )
 
 
@@ -2102,20 +2109,39 @@ def create_output(
     return numpy.memmap(out, shape=shape, dtype=dtype, mode='w+')
 
 
-def case_sensitive_path(path: str | os.PathLike[str], /) -> str:
-    """Return actual case of path."""
-    if os.path.exists(path):
-        return str(path)
-    path = os.path.abspath(path)
-    dirname, basename = os.path.split(path)
-    if dirname == path:
-        return dirname
-    dirname = case_sensitive_path(dirname)
-    basename = basename.lower()
-    for child in os.listdir(dirname):
-        if child.lower() == basename:
-            return os.path.join(dirname, child)
-    raise FileNotFoundError(f'{str(path)!r} not found')
+@lru_cache(maxsize=128)
+def case_sensitive_path(path: str, /) -> str:
+    """Return actual case of path on case-sensitive file systems.
+
+    Recursively walk directory tree to find actual case of each path component.
+    Results are cached for better performance.
+
+    Parameters:
+        path: Path to check.
+
+    Returns:
+        Path with correct case.
+
+    Raises:
+        FileNotFoundError: Path does not exist or is not accessible.
+
+    """
+    try:
+        if os.path.exists(path):
+            return str(path)
+        path = os.path.abspath(path)
+        dirname, basename = os.path.split(path)
+        if dirname == path:
+            return dirname
+        dirname = case_sensitive_path(dirname)
+        basename = basename.lower()
+        with os.scandir(dirname) as it:
+            for entry in it:
+                if entry.name.lower() == basename:
+                    return os.path.join(dirname, entry.name)
+        raise FileNotFoundError(f'{str(path)!r} not found')
+    except (OSError, PermissionError) as exc:
+        raise FileNotFoundError(f'{str(path)!r} not accessible') from exc
 
 
 def xml2dict(
@@ -2130,11 +2156,14 @@ def xml2dict(
     """Return XML as dictionary.
 
     Parameters:
-        xml: XML data to convert.
+        xml_element: XML data to convert.
         sanitize: Remove prefix from from etree Element.
         prefix: Prefixes for dictionary keys.
         exclude: Ignore element tags.
         sep: Sequence separator.
+
+    Returns:
+        dict: Dictionary representation of XML element.
 
     """
     at, tx = prefix if prefix else ('', '')
@@ -2224,9 +2253,9 @@ def asbool(
 
 def indent(*args: Any) -> str:
     """Return joined string representations of objects with indented lines."""
-    text = "\n".join(str(arg) for arg in args)
-    return "\n".join(
-        ("  " + line if line else line) for line in text.splitlines() if line
+    text = '\n'.join(str(arg) for arg in args)
+    return '\n'.join(
+        ('  ' + line if line else line) for line in text.splitlines() if line
     )[2:]
 
 
