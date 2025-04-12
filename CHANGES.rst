@@ -1,6 +1,10 @@
 Revisions
 ---------
 
+2025.4.12
+
+- Improve case_sensitive_path function.
+
 2025.3.8
 
 - Support LOF files without LMSDataContainerHeader XML element.
