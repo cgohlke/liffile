@@ -32,7 +32,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.4.12
+:Version: 2025.5.10
 
 """
 
@@ -63,7 +63,6 @@ from liffile import (
     LifMemoryBlock,
     __version__,
     imread,
-    logger,
     xml2dict,
 )
 from liffile.liffile import case_sensitive_path
