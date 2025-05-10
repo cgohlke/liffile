@@ -1,6 +1,10 @@
 Revisions
 ---------
 
+2025.5.10
+
+- Support Python 3.14.
+
 2025.4.12
 
 - Improve case_sensitive_path function.
