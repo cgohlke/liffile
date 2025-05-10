@@ -13,8 +13,8 @@ These files are written by LAS X software to store collections of images
 and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
-:License: BSD 3-Clause
-:Version: 2025.4.12
+:License: BSD-3-Clause
+:Version: 2025.5.10
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -37,15 +37,19 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.10, 3.13.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.2.4
+- `NumPy <https://pypi.org/project/numpy>`_ 2.2.5
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.3.30
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.3.1 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.1 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.3.30 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.4.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.3 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.5.10 (optional)
 
 Revisions
 ---------
+
+2025.5.10
+
+- Support Python 3.14.
 
 2025.4.12
 
@@ -153,9 +157,9 @@ Read a FLIM lifetime image and metadata from a LIF file:
     <xarray.DataArray 'Fast Flim' (Y: 1024, X: 1024)> Size: 2MB
     array([[...]],
           shape=(1024, 1024), dtype=float16)
-        Coordinates:
-          * Y        (Y) float64... 0.0005564
-          * X        (X) float64... 0.0005564
+    Coordinates:
+      * Y        (Y) float64... 0.0005564
+      * X        (X) float64... 0.0005564
     Attributes...
         path:           FLIM_testdata.lif/sample1_slice1/FLIM Compressed/Fast Flim
         F16:            {'Name': 'F16',...
