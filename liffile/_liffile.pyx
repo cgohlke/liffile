@@ -38,7 +38,7 @@
 
 """Decode Leica Microsystems compressed memory blocks."""
 
-from libc.stdint cimport uint8_t, int8_t
+from libc.stdint cimport uint8_t
 
 
 def lms_decode(const uint8_t[::1] data):
