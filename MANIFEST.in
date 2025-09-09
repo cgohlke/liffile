@@ -13,6 +13,7 @@ include docs/_static/custom.css
 # include .github/workflows/wheel.yml
 
 exclude *.cmd
+exclude *.yaml
 exclude mypy.ini
 recursive-exclude doc *
 recursive-exclude docs *
