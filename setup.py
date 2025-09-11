@@ -115,7 +115,7 @@ setup(
     packages=['liffile'],
     package_data={'liffile': ['py.typed']},
     entry_points={'console_scripts': ['liffile = liffile.__main__:main']},
-    python_requires='>=3.10',
+    python_requires='>=3.11',
     install_requires=['numpy'],
     extras_require={
         'all': ['xarray', 'tifffile', 'imagecodecs', 'matplotlib']
@@ -129,7 +129,6 @@ setup(
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
         'Programming Language :: Python :: 3 :: Only',
-        'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
