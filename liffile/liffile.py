@@ -41,7 +41,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.5.10
+:Version: 2025.9.28
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -63,16 +63,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.10, 3.13.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.2.5
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.3.30
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.7, 3.14.0rc 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.3
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.8.2
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.4.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.3 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.5.10 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.9.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.6 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.9.20 (optional)
 
 Revisions
 ---------
+
+2025.9.28
+
+- Derive LifFileError from ValueError.
+- Minor fixes.
+- Drop support for Python 3.10.
 
 2025.5.10
 
@@ -148,7 +154,7 @@ Large, backwards-incompatible changes may occur between revisions.
 
 Specifically, the following features are currently not supported:
 XLLF formats, image mosaics and pyramids, partial image reads,
-reading non-image data like FLIM/TCSPC, heterogeneous channel data types,
+reading non-image data such as FLIM/TCSPC, heterogeneous channel data types,
 discontiguous storage, and bit increments.
 
 The library has been tested with a limited number of version 2 files only.
@@ -163,7 +169,7 @@ The Leica image file formats are documented at:
 
 Other implementations for reading Leica image files are
 `readlif <https://github.com/Arcadia-Science/readlif>`_ and
-`Bio-Formats <https://github.com/ome/bioformats>`_ .
+`Bio-Formats <https://github.com/ome/bioformats>`_.
 
 Examples
 --------
@@ -199,7 +205,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.5.10'
+__version__ = '2025.9.28'
 
 __all__ = [
     '__version__',
@@ -327,7 +333,7 @@ def imread(
     return data
 
 
-class LifFileError(Exception):
+class LifFileError(ValueError):
     """Exception to indicate invalid Leica Image File structure."""
 
 
@@ -1991,7 +1997,7 @@ class LifRawData:
     bi_directional: bool
     """Bi-directional scan."""
     sequential_mode: bool
-    """Look Up Table is inverted."""
+    """Sequential mode."""
 
 
 if imagecodecs is not None:
@@ -2097,7 +2103,26 @@ def create_output(
     shape: tuple[int, ...],
     dtype: DTypeLike,
 ) -> NDArray[Any] | numpy.memmap[Any, Any]:
-    """Return NumPy array where images of shape and dtype can be copied."""
+    """Return NumPy array where images of shape and dtype can be copied.
+
+    Parameters:
+        out: Output specification.
+
+            - None: Create new array in memory
+            - numpy.ndarray: Existing array (will be reshaped)
+            - str starting with 'memmap': Create temporary memory-mapped file
+            - str (file path): Create memory-mapped file at specified path
+
+        shape: Shape of output array.
+        dtype: Data type of output array.
+
+    Returns:
+        Configured NumPy array or memory-mapped array.
+
+    Raises:
+        ValueError: Existing array cannot be reshaped to required shape.
+
+    """
     if out is None:
         return numpy.zeros(shape, dtype)
     if isinstance(out, numpy.ndarray):
@@ -2160,7 +2185,7 @@ def xml2dict(
 
     Parameters:
         xml_element: XML data to convert.
-        sanitize: Remove prefix from from etree Element.
+        sanitize: Remove prefix from etree Element.
         prefix: Prefixes for dictionary keys.
         exclude: Ignore element tags.
         sep: Sequence separator.
@@ -2315,7 +2340,7 @@ def main(argv: list[str] | None = None) -> int:
     filter = False
     if len(argv) == 1:
         path = askopenfilename(
-            title='Select a TIFF file',
+            title='Select a Leica image file',
             filetypes=[
                 (f'{ext.upper()} files', f'*{ext}') for ext in FILE_EXTENSIONS
             ]
