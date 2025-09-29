@@ -1,6 +1,12 @@
 Revisions
 ---------
 
+2025.9.28
+
+- Derive LifFileError from ValueError.
+- Minor fixes.
+- Drop support for Python 3.10.
+
 2025.5.10
 
 - Support Python 3.14.
