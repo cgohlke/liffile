@@ -27,12 +27,9 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-# mypy: allow-untyped-defs
-# mypy: check-untyped-defs=False
-
 """Unittests for the liffile package.
 
-:Version: 2025.5.10
+:Version: 2025.9.28
 
 """
 
@@ -44,13 +41,17 @@ import os
 import pathlib
 import re
 import sys
+import sysconfig
 import tempfile
 from xml.etree import ElementTree
 
-import liffile
 import numpy
 import pytest
 import xarray
+from numpy.testing import assert_allclose, assert_array_equal
+from xarray import DataArray
+
+import liffile
 from liffile import (
     FILE_EXTENSIONS,
     LifFile,
@@ -66,8 +67,6 @@ from liffile import (
     xml2dict,
 )
 from liffile.liffile import case_sensitive_path
-from numpy.testing import assert_allclose, assert_array_equal
-from xarray import DataArray
 
 HERE = pathlib.Path(os.path.dirname(__file__))
 DATA = HERE / 'data'
@@ -901,7 +900,7 @@ def test_lif(filetype):
         assert lif.version == 2
         assert lif.uuid == '9da018ae-5b2b-11e3-8f53-eccd6d2154b5'
         assert lif.datetime == datetime.datetime(
-            2013, 12, 2, 8, 27, 44, tzinfo=datetime.timezone.utc
+            2013, 12, 2, 8, 27, 44, tzinfo=datetime.UTC
         )
         assert len(lif.memory_blocks) == 240
         assert isinstance(lif.xml_element, ElementTree.Element)
@@ -921,6 +920,7 @@ def test_lif(filetype):
 
         for image in series:
             str(image)
+            assert isinstance(image, LifImageABC)
             assert isinstance(image, LifImage)
 
         images = series.findall('XZEXcLambda/Lambda.*', flags=re.IGNORECASE)
@@ -1030,6 +1030,7 @@ def test_lof():
 
         for image in series:
             assert image.path == image.name
+            assert isinstance(image, LifImageABC)
             assert isinstance(image, LifImage)
 
         images = series.findall('XYCST', flags=re.IGNORECASE)
@@ -1135,6 +1136,7 @@ def test_xlif(name):
         for image in series:
             str(image)
             assert image.path == image.name
+            assert isinstance(image, LifImageABC)
             assert isinstance(image, LifImage)
 
         images = series.findall('ImageXYZ10C2', flags=re.IGNORECASE)
@@ -1268,6 +1270,7 @@ def test_xlef(name):
         for image in series:
             str(image)
             assert image.path.endswith(image.name)
+            assert isinstance(image, LifImageABC)
             assert isinstance(image, LifImage)
 
         images = series.findall('Series010_EDF001', flags=re.IGNORECASE)
@@ -1341,6 +1344,7 @@ def test_lifext():
 
         for image in series:
             str(image)
+            assert isinstance(image, LifImageABC)
             assert isinstance(image, LifImage)
 
         images = series.findall('XYZCS_pmd_0.*', flags=re.IGNORECASE)
@@ -1448,6 +1452,7 @@ def test_flim(name):
         base = lif.images['sample1_slice1']
 
         flim = lif.images['FLIM Compressed']
+        assert isinstance(flim, LifImageABC)
         assert isinstance(flim, LifFlimImage)
         if name.endswith('.lif'):
             assert flim.parent_image is base
@@ -1544,7 +1549,7 @@ def test_flim(name):
     ],
 )
 def test_flim_nd(name):
-    """Test multi-dimenional FLIM image formats."""
+    """Test multi-dimensional FLIM image formats."""
     filename = DATA / name
     with LifFile(filename) as lif:
         str(lif)
@@ -1555,6 +1560,7 @@ def test_flim_nd(name):
         base = lif.images['Series006 Crop']
 
         flim = lif.images['Series006$']
+        assert isinstance(flim, LifImageABC)
         assert isinstance(flim, LifFlimImage)
         # if name.endswith('.lif'):
         assert flim.parent_image is base
@@ -1618,6 +1624,7 @@ def test_flim_lof():
             str(image)
 
         flim = lof.images['FLIM Compressed']
+        assert isinstance(flim, LifImageABC)
         assert isinstance(flim, LifFlimImage)
         assert flim.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
         assert flim.is_flim
@@ -1867,6 +1874,14 @@ def test_xml2dict():
     assert d['floats'] == '1.0, -2.0'
 
 
+@pytest.mark.skipif(
+    not hasattr(sys, '_is_gil_enabled'), reason='Python < 3.12'
+)
+def test_gil_enabled():
+    """Test that GIL is disabled on thread-free Python."""
+    assert sys._is_gil_enabled() != sysconfig.get_config_var('Py_GIL_DISABLED')
+
+
 @pytest.mark.parametrize(
     'fname',
     itertools.chain.from_iterable(
@@ -1911,3 +1926,6 @@ if __name__ == '__main__':
     argv.append('--cov=liffile')
     argv.append('--verbose')
     sys.exit(pytest.main(argv))
+
+# mypy: allow-untyped-defs
+# mypy: check-untyped-defs=False
