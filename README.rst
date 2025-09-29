@@ -14,7 +14,7 @@ and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.5.10
+:Version: 2025.9.28
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -36,16 +36,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.10.11, 3.11.9, 3.12.10, 3.13.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.2.5
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.3.30
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.7, 3.14.0rc 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.3
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.8.2
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.4.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.3 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.5.10 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.9.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.6 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.9.20 (optional)
 
 Revisions
 ---------
+
+2025.9.28
+
+- Derive LifFileError from ValueError.
+- Minor fixes.
+- Drop support for Python 3.10.
 
 2025.5.10
 
@@ -121,7 +127,7 @@ Large, backwards-incompatible changes may occur between revisions.
 
 Specifically, the following features are currently not supported:
 XLLF formats, image mosaics and pyramids, partial image reads,
-reading non-image data like FLIM/TCSPC, heterogeneous channel data types,
+reading non-image data such as FLIM/TCSPC, heterogeneous channel data types,
 discontiguous storage, and bit increments.
 
 The library has been tested with a limited number of version 2 files only.
@@ -136,7 +142,7 @@ The Leica image file formats are documented at:
 
 Other implementations for reading Leica image files are
 `readlif <https://github.com/Arcadia-Science/readlif>`_ and
-`Bio-Formats <https://github.com/ome/bioformats>`_ .
+`Bio-Formats <https://github.com/ome/bioformats>`_.
 
 Examples
 --------
