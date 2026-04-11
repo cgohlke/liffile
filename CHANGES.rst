@@ -1,5 +1,10 @@
 Revisions
----------
+=========
+
+2026.4.11
+
+- Add channel name resolution to LifImage via coords['C'] and coords['S'].
+- Drop support for Python 3.11.
 
 2026.2.16
 
