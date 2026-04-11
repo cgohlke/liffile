@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.2.16
+:Version: 2026.4.11
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -61,17 +61,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.2.16
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
 
 Revisions
 ---------
+
+2026.4.11
+
+- Add channel name resolution to LifImage via coords['C'] and coords['S'].
+- Drop support for Python 3.11.
 
 2026.2.16
 
@@ -136,20 +141,29 @@ Refer to the CHANGES file for older revisions.
 Notes
 -----
 
+The API is not stable yet and might change between revisions.
+
 `Leica Microsystems GmbH <https://www.leica.com/>`_ is a manufacturer of
-microscopes and scientific instruments for the analysis of micro and
-nanostructures.
+microscopes and scientific instruments.
+Leica image files are proprietary formats written by Leica acquisition
+software such as LAS X and LAS AF to store microscopy images and metadata.
 
-This library is in its early stages of development. It is not feature-complete.
-Large, backwards-incompatible changes may occur between revisions.
+The Leica Image File (LIF) begins with a magic number followed by a UTF-16
+XML header that describes images and metadata, then stores the raw pixel data
+for each image in contiguous data blocks.
+Images may be multi-dimensional (X, Y, Z, T, C, ...) with multiple channels,
+and a single file can contain many independent image series.
+Related formats include LOF (single-object variant), XLIF, XLEF, and XLCF
+(XML-based containers), XLLF (folder-view), and LIFEXT (optional image data
+extensions).
 
-Specifically, the following features are currently not supported:
-XLLF formats, image mosaics and pyramids, reading non-image data such as
-FLIM/TCSPC, and bit increments.
+This library is not feature-complete. Unsupported features currently include
+XLLF, image mosaics and pyramids, bit increments, and non-image data such as
+raw FLIM/TCSPC histogram data.
 
-The library has been tested with a limited number of version 2 files only.
+The library has been tested with only a limited number of version 2 files.
 
-The Leica image file formats are documented at:
+The Leica image file formats are documented in:
 
 - Leica Image File Formats - LIF, XLEF, XLLF, LOF. Version 3.2.
   Leica Microsystems GmbH. 21 September 2016.
@@ -214,7 +228,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.2.16'
+__version__ = '2026.4.11'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -250,12 +264,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cached_property, lru_cache
-from typing import TYPE_CHECKING, final, overload
+from types import MappingProxyType
+from typing import TYPE_CHECKING, final, overload, override
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Iterable, Iterator
+    from collections.abc import Container, Iterable, Iterator, Mapping
     from types import TracebackType
     from typing import IO, Any, ClassVar, Literal, Self
 
@@ -415,9 +430,11 @@ class BinaryFile:
             in binary mode.
 
     Raises:
+        TypeError:
+            File is a text stream, or an unsupported type.
         ValueError:
             Invalid file name, extension, or stream.
-            File is not a binary or seekable stream.
+            File stream is not seekable.
 
     """
 
@@ -450,6 +467,7 @@ class BinaryFile:
                 mode = 'r'
             else:
                 if mode[-1:] == 'b':
+                    # accept 'rb'/'r+b'
                     mode = mode[:-1]  # type: ignore[assignment]
                 if mode not in {'r', 'r+'}:
                     msg = f'invalid {mode=!r}'
@@ -461,7 +479,9 @@ class BinaryFile:
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                msg = f'{file=!r} is not open in binary mode'
+                msg = (  # type: ignore[unreachable]
+                    f'{file=!r} is not open in binary mode'
+                )
                 raise TypeError(msg)
 
             self._fh = file
@@ -471,9 +491,9 @@ class BinaryFile:
                 msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
-                self._path = os.path.normpath(file.path)
+                self._path = os.path.abspath(file.path)
             elif hasattr(file, 'name'):
-                self._path = os.path.normpath(file.name)
+                self._path = os.path.abspath(file.name)
 
         elif hasattr(file, 'open'):
             # fsspec OpenFile
@@ -487,20 +507,18 @@ class BinaryFile:
                 msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
-                self._path = os.path.normpath(file.path)
+                self._path = os.path.abspath(file.path)
 
         else:
             msg = f'cannot handle {type(file)=}'
-            raise ValueError(msg)
+            raise TypeError(msg)
 
         if hasattr(file, 'name') and file.name:
             self._name = os.path.basename(file.name)
         elif self._path:
             self._name = os.path.basename(self._path)
-        elif isinstance(file, io.BytesIO):
-            self._name = 'BytesIO'
-        # else:
-        #     self._name = f'{type(file)}'
+        else:
+            self._name = type(file).__name__
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -509,17 +527,17 @@ class BinaryFile:
 
     @property
     def filepath(self) -> str:
-        """Path to file or empty if binary stream."""
+        """Absolute path to file, or empty string if unavailable."""
         return self._path
 
     @property
     def filename(self) -> str:
-        """Name of file or empty if binary stream."""
+        """Name of file, or empty if no path is available."""
         return os.path.basename(self._path)
 
     @property
     def dirname(self) -> str:
-        """Directory containing file or empty if binary stream."""
+        """Directory containing file, or empty if no path is available."""
         return os.path.dirname(self._path)
 
     @property
@@ -532,9 +550,9 @@ class BinaryFile:
         self._name = value
 
     @property
-    def attrs(self) -> dict[str, Any]:
+    def attrs(self) -> Mapping[str, Any]:
         """Selected metadata as dict."""
-        return {'name': self.name, 'filepath': self.filepath}
+        return MappingProxyType({'name': self.name, 'filepath': self.filepath})
 
     @property
     def closed(self) -> bool:
@@ -543,8 +561,8 @@ class BinaryFile:
 
     def close(self) -> None:
         """Close file."""
+        self._closed = True  # always report file as closed
         if self._close:
-            self._closed = True
             with contextlib.suppress(Exception):
                 self._fh.close()
 
@@ -560,9 +578,7 @@ class BinaryFile:
         self.close()
 
     def __repr__(self) -> str:
-        if self._name:
-            return f'<{self.__class__.__name__} {self._name!r}>'
-        return f'<{self.__class__.__name__}>'
+        return f'<{self.__class__.__name__} {self._name!r}>'
 
 
 @final
@@ -1266,6 +1282,80 @@ class LifImage(LifImageABC):
         )
 
     @cached_property
+    def _channel_names(self) -> tuple[str, ...]:
+        """Channel names for C or S coordinates."""
+        channels = self._channels
+        n = len(channels)
+        if self.sizes.get('C', 0) > 1 and self.sizes.get('S', 0) > 1:
+            return tuple(f'Ch{i}' for i in range(n))
+        # build initial names from ChannelProperty/DyeName or ChannelTag
+        # fallback, sorted by BytesInc to match _channels order
+        channel_elements = sorted(
+            self.xml_element.findall(
+                './Data/Image/ImageDescription/Channels/ChannelDescription'
+            ),
+            key=lambda el: int(el.attrib['BytesInc']),
+        )
+        names = []
+        all_generic = True
+        for i, ch_el in enumerate(channel_elements):
+            tag = int(ch_el.attrib['ChannelTag'])
+            if 0 < tag < 4:
+                ch_name = ('Red', 'Green', 'Blue')[tag - 1]
+                all_generic = False
+            else:
+                ch_name = f'Ch{i}'
+            prop = ch_el.find("ChannelProperty[Key='DyeName']")
+            if prop is not None:
+                dye = prop.findtext('Value')
+                if dye:
+                    ch_name = dye.removeprefix('Leica/')
+                    all_generic = False
+            names.append(ch_name)
+
+        # if all names are generic (Ch0, Ch1, ...) try HardwareSetting sources
+        if n > 0 and all_generic:
+            hs = self.xml_element.find(
+                './Data/Image/Attachment[@Name="HardwareSetting"]'
+            )
+            if hs is not None:
+                # source 1: main ATLConfocalSettingDefinition MultiBand
+                acsdef = hs.find('ATLConfocalSettingDefinition')
+                if acsdef is not None:
+                    mb_names = [
+                        mb.attrib['DyeName'].removeprefix('Leica/')
+                        for mb in acsdef.findall('.//MultiBand')
+                        if mb.attrib.get('DyeName', '')
+                    ]
+                    if len(mb_names) == n:
+                        return tuple(mb_names)
+
+                # source 2: sequential scan per-step
+                # each LDM_Block_Sequential_List child is one sequential step;
+                # only use if every step activates exactly one channel
+                seq = hs.find('LDM_Block_Sequential')
+                if seq is not None:
+                    step_names: list[str] = []
+                    for step_list in seq.findall('LDM_Block_Sequential_List'):
+                        for child in step_list:
+                            if child.tag == 'ATLConfocalSettingDefinition':
+                                step_mb = [
+                                    mb.attrib['DyeName']
+                                    for mb in child.findall('.//MultiBand')
+                                    if mb.attrib.get('DyeName', '')
+                                ]
+                                if len(step_mb) == 1:
+                                    step_names.append(
+                                        step_mb[0].removeprefix('Leica/')
+                                    )
+                    if len(step_names) == n:
+                        return tuple(step_names)
+
+        if self._is_bgr:
+            names.reverse()
+        return tuple(names)
+
+    @cached_property
     def _is_bgr(self) -> bool:
         """Image has BGR channel order."""
         return (
@@ -1310,6 +1400,7 @@ class LifImage(LifImageABC):
             return tif
         return None
 
+    @override
     @cached_property
     def dtype(self) -> numpy.dtype[Any]:
         channels = self._channels
@@ -1328,6 +1419,7 @@ class LifImage(LifImageABC):
 
         return dtype
 
+    @override
     @cached_property
     def sizes(self) -> dict[str, int]:
         squeeze = self.parent._squeeze
@@ -1389,9 +1481,9 @@ class LifImage(LifImageABC):
             )
         return dict(reversed(list(sizes.items())))
 
+    @override
     @cached_property
     def coords(self) -> dict[str, NDArray[Any]]:
-        # TODO: add channel names. Channels may be in several dimensions
         squeeze = self.parent._squeeze
         coords = {}
         for dim in self._dimensions:
@@ -1408,8 +1500,17 @@ class LifImage(LifImageABC):
             if dim.label in {'M', 'N'}:
                 coord = numpy.astype(coord, numpy.intp)
             coords[dim.label] = coord
+        channel_names = self._channel_names
+        sizes = self.sizes
+        nc = sizes.get('C')
+        if nc and nc == len(channel_names):
+            coords['C'] = numpy.array(channel_names)
+        ns = sizes.get('S')
+        if ns and ns == len(channel_names):
+            coords['S'] = numpy.array(channel_names)
         return coords
 
+    @override
     @cached_property
     def attrs(self) -> dict[str, Any]:
         path = self.path
@@ -1421,6 +1522,13 @@ class LifImage(LifImageABC):
             'path': path,
             'UniqueID': self.uuid,
         }
+        # image_description = self.xml_element.find(
+        #     './Data/Image/ImageDescription'
+        # )
+        # if image_description is not None:
+        #     attrs['ImageDescription'] = xml2dict(image_description).get(
+        #         'ImageDescription', {}
+        #     )
         attrs.update(
             (attach.attrib['Name'], xml2dict(attach)['Attachment'])
             for attach in self.xml_element.findall('./Data/Image/Attachment')
@@ -1560,6 +1668,7 @@ class LifImage(LifImageABC):
         """
         return LifImageFrames(self)
 
+    @override
     def asarray(
         self,
         *,
@@ -1618,10 +1727,12 @@ class LifFlimImage(LifImageABC):
 
     """
 
+    @override
     @cached_property
     def dtype(self) -> numpy.dtype[Any]:
         return numpy.dtype(numpy.uint16)
 
+    @override
     @cached_property
     def sizes(self) -> dict[str, int]:
         sizes = {'H': self.number_bins_in_period}
@@ -1645,6 +1756,7 @@ class LifFlimImage(LifImageABC):
 
         return dict(reversed(list(sizes.items())))
 
+    @override
     @cached_property
     def coords(self) -> dict[str, NDArray[Any]]:
         attrs = self.attrs['RawData']
@@ -1667,6 +1779,7 @@ class LifFlimImage(LifImageABC):
             )
         return coords
 
+    @override
     @cached_property
     def attrs(self) -> dict[str, Any]:
         rawdata = self.xml_element.find(
@@ -1724,6 +1837,7 @@ class LifFlimImage(LifImageABC):
         """Sinusoidal scan mode."""
         return bool(self.attrs['RawData']['SinusCorrection'])
 
+    @override
     def asarray(
         self,
         *,
@@ -2736,6 +2850,7 @@ class LifImageSeries(Sequence[LifImageABC]):
                 images.append(image)
         return tuple(images)
 
+    @override
     def __getitem__(  # type: ignore[override]
         self,
         key: int | str,
@@ -2765,9 +2880,11 @@ class LifImageSeries(Sequence[LifImageABC]):
         msg = f'image {key!r} not found'
         raise KeyError(msg)
 
+    @override
     def __len__(self) -> int:
         return len(self._images)
 
+    @override
     def __iter__(self) -> Iterator[LifImageABC]:
         return iter(self._images.values())
 
@@ -3182,7 +3299,7 @@ class LifChannel:
     """Look Up Table is inverted."""
 
     bytes_inc: int
-    """Distance from the first channel in bytes."""
+    """Distance from first channel in bytes."""
 
     bit_inc: int
     """Bit distance."""
@@ -3211,7 +3328,7 @@ class LifDimension:
     """Physical unit."""
 
     bytes_inc: int
-    """Distance from one element to the next."""
+    """Distance from one element to next."""
 
     bit_inc: int
     """Bit distance."""
