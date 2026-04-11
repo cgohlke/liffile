@@ -12,7 +12,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.2.16
+:Version: 2026.4.11
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -34,17 +34,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.2.16
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
 
 Revisions
 ---------
+
+2026.4.11
+
+- Add channel name resolution to LifImage via coords['C'] and coords['S'].
+- Drop support for Python 3.11.
 
 2026.2.16
 
@@ -109,20 +114,29 @@ Refer to the CHANGES file for older revisions.
 Notes
 -----
 
+The API is not stable yet and might change between revisions.
+
 `Leica Microsystems GmbH <https://www.leica.com/>`_ is a manufacturer of
-microscopes and scientific instruments for the analysis of micro and
-nanostructures.
+microscopes and scientific instruments.
+Leica image files are proprietary formats written by Leica acquisition
+software such as LAS X and LAS AF to store microscopy images and metadata.
 
-This library is in its early stages of development. It is not feature-complete.
-Large, backwards-incompatible changes may occur between revisions.
+The Leica Image File (LIF) begins with a magic number followed by a UTF-16
+XML header that describes images and metadata, then stores the raw pixel data
+for each image in contiguous data blocks.
+Images may be multi-dimensional (X, Y, Z, T, C, ...) with multiple channels,
+and a single file can contain many independent image series.
+Related formats include LOF (single-object variant), XLIF, XLEF, and XLCF
+(XML-based containers), XLLF (folder-view), and LIFEXT (optional image data
+extensions).
 
-Specifically, the following features are currently not supported:
-XLLF formats, image mosaics and pyramids, reading non-image data such as
-FLIM/TCSPC, and bit increments.
+This library is not feature-complete. Unsupported features currently include
+XLLF, image mosaics and pyramids, bit increments, and non-image data such as
+raw FLIM/TCSPC histogram data.
 
-The library has been tested with a limited number of version 2 files only.
+The library has been tested with only a limited number of version 2 files.
 
-The Leica image file formats are documented at:
+The Leica image file formats are documented in:
 
 - Leica Image File Formats - LIF, XLEF, XLLF, LOF. Version 3.2.
   Leica Microsystems GmbH. 21 September 2016.
