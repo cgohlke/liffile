@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.2.16
+:Version: 2026.4.11
 
 """
 
@@ -985,7 +985,11 @@ class TestBinaryFile:
         assert fh.filehandle.tell() == 10
         assert fh.filehandle.read(1) == b'\n'
         fh.close()
-        assert fh.closed is closed
+        # underlying filehandle may still be be open if
+        # BinaryFile was given an open filehandle
+        assert fh._fh.closed is closed
+        # BinaryFile always reports itself as closed after close() is called
+        assert fh.closed
 
     def test_str(self):
         """Test BinaryFile with str path."""
@@ -1078,7 +1082,7 @@ class TestBinaryFile:
             # mock non-file object
             pass
 
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             BinaryFile(File)
 
     def test_invalid_mode(self):
@@ -1162,8 +1166,8 @@ def test_not_lif():
         imread(DATA / 'empty.bin')
     with pytest.raises(LifFileError):
         imread(DATA / 'ScanModesExamples.lif.xml')
-    with pytest.raises(ValueError):
-        imread(ValueError)
+    with pytest.raises(TypeError):
+        imread(TypeError)
 
 
 @pytest.mark.parametrize(
@@ -1305,7 +1309,7 @@ def test_lif(filetype, scanmodes_file):
         assert im.shape == (7, 5, 2, 128, 128)
         assert im.dims == ('T', 'Z', 'C', 'Y', 'X')
         assert im.sizes == {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128}
-        assert 'C' not in im.coords
+        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 10.657])
         assert_allclose(im.coords['Z'][[0, -1]], [4.999881e-06, -5.000359e-06])
         assert_allclose(im.coords['Y'][[0, -1]], [-3.418137e-05, 3.658182e-04])
@@ -1418,7 +1422,7 @@ def test_lof():
         assert im.shape == (2, 4, 3, 1200, 1600)
         assert im.dims == ('T', 'M', 'C', 'Y', 'X')
         assert im.sizes == {'T': 2, 'M': 4, 'C': 3, 'Y': 1200, 'X': 1600}
-        assert 'C' not in im.coords
+        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1', 'Ch2'])
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 1.0])
         assert_allclose(im.coords['Y'][[0, -1]], [0.0, 0.00122755], atol=1e-4)
         assert_allclose(im.coords['X'][[0, -1]], [0.0, 0.00163707], atol=1e-4)
@@ -1535,7 +1539,7 @@ def test_xlif(name, block_type):
         assert im.shape == (10, 2, 512, 512)
         assert im.dims == ('Z', 'C', 'Y', 'X')
         assert im.sizes == {'Z': 10, 'C': 2, 'Y': 512, 'X': 512}
-        assert 'C' not in im.coords
+        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(
             im.coords['Z'][[0, -1]], [-2.345302e-05, 1.786591e-05], atol=1e-4
         )
@@ -1849,7 +1853,7 @@ def test_lifext():
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.sizes == {'M': 4, 'C': 2, 'Z': 5, 'Y': 300, 'X': 400}
-        assert 'C' not in im.coords
+        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(im.coords['Z'][[0, -1]], [0.0, 7.19784e-05])
         assert im.attrs['path'] != im.parent.name + '/' + im.path
         assert im.timestamps is None
@@ -2079,13 +2083,17 @@ def test_frames_selection_types():
         assert frames.dims == ('C', 'Z', 'Y', 'X')
         assert frames.shape == (4, 10, 1024, 1024)
 
-        # check that image has coords for spatial dimensions
+        # check that image has coords for spatial and channel dimensions
         assert 'Y' in image.coords
         assert 'X' in image.coords
         assert 'Z' in image.coords
         assert len(image.coords['Z']) == 10
         assert len(image.coords['Y']) == 1024
         assert len(image.coords['X']) == 1024
+        assert_array_equal(
+            image.coords['C'],
+            ['ALEXA 405', 'ALEXA 488', 'ALEXA 488', 'ALEXA 555'],
+        )
 
         # full frames should have same coords
         assert 'Y' in frames.coords
@@ -2631,6 +2639,9 @@ def test_rgb():
     with LifFile(filename) as lif:
         image = lif.images[0]
         assert image.sizes == {'C': 2, 'Y': 1536, 'X': 2048, 'S': 3}
+        # C=2, S=3 -> 6 channels total; count mismatch so no coords for C or S
+        assert 'C' not in image.coords
+        assert 'S' not in image.coords
         assert_array_equal(
             image.timestamps,
             numpy.array(
@@ -2651,6 +2662,7 @@ def test_rgb():
 
         image = lif.images[1]
         assert image.sizes == {'Y': 1536, 'X': 2048, 'S': 3}
+        assert_array_equal(image.coords['S'], ['Red', 'Green', 'Blue'])
         data = image.asarray()
         assert data.sum(dtype=numpy.uint64) == 86724120
 
@@ -2691,6 +2703,29 @@ def test_rgb_pad():
         out = numpy.zeros((531, 531, 3), numpy.uint8)
         with pytest.raises(ValueError):
             lif.images[1].asarray(out=out)
+
+
+def test_channel_names_multiband():
+    """Test channel names from MultiBand in ATLConfocalSettingDefinition."""
+    filename = DATA / 'Experiment001.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        assert image.sizes == {'C': 2, 'Y': 512, 'X': 512}
+        # names come from MultiBand in main ATLConfocalSettingDefinition,
+        # with 'Leica/' prefix stripped
+        assert_array_equal(image.coords['C'], ['EGFP', 'dTomato'])
+
+
+def test_channel_names_sequential():
+    """Test channel names from MultiBand in sequential scan steps."""
+    filename = DATA / 'Raw Stacks.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        assert image.name == 'Series038'
+        assert image.sizes == {'Z': 87, 'C': 3, 'Y': 256, 'X': 256}
+        # names come from per-step MultiBand in LDM_Block_Sequential,
+        # with 'Leica/' prefix stripped
+        assert_array_equal(image.coords['C'], ['ECFP', 'EYFP', 'mCherry'])
 
 
 def test_issue_memoryblocks():
