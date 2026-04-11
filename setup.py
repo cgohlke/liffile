@@ -10,8 +10,6 @@ import sysconfig
 import numpy
 from setuptools import Extension, setup
 
-buildnumber = ''
-
 DEBUG = bool(os.environ.get('CG_DEBUG', ''))
 LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in ('1', 'true')
 
@@ -52,14 +50,13 @@ def fix_docstring_examples(docstring: str) -> str:
                 lines.extend(['.. code-block:: python', ''])
                 start = False
         lines.append(('    ' if indent else '') + line)
-    return '\n'.join(lines)
+    return '\n'.join(lines) + '\n'
 
 
 with open('liffile/liffile.py', encoding='utf-8') as fh:
     code = fh.read()
 
 version = search(r"__version__ = '(.*?)'", code).replace('.x.x', '.dev0')
-version += ('.' + buildnumber) if buildnumber else ''
 
 description = search(r'"""(.*)\.(?:\r\n|\r|\n)', code)
 
@@ -75,7 +72,7 @@ readme = '\n'.join(
 if 'sdist' in sys.argv:
     # update README, LICENSE, and CHANGES files
 
-    with open('README.rst', 'w', encoding='utf-8') as fh:
+    with open('README.rst', 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(fix_docstring_examples(readme))
 
     license = search(
@@ -85,7 +82,7 @@ if 'sdist' in sys.argv:
     )
     license = license.replace('# ', '').replace('#', '')
 
-    with open('LICENSE', 'w', encoding='utf-8') as fh:
+    with open('LICENSE', 'w', encoding='utf-8', newline='\n') as fh:
         fh.write('BSD-3-Clause license\n\n')
         fh.write(license)
 
@@ -99,8 +96,8 @@ if 'sdist' in sys.argv:
         old = fh.read()
 
     old = old.split(revisions.splitlines()[-1])[-1]
-    with open('CHANGES.rst', 'w', encoding='utf-8') as fh:
-        fh.write(revisions.strip())
+    with open('CHANGES.rst', 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(revisions.replace('---------', '=========').strip())
         fh.write(old)
 
 ext_modules = [
@@ -137,14 +134,13 @@ setup(
     packages=['liffile'],
     package_data={'liffile': ['py.typed']},
     entry_points={'console_scripts': ['liffile = liffile.__main__:main']},
-    python_requires='>=3.11',
+    python_requires='>=3.12',
     install_requires=['numpy'],
     extras_require={
         'all': ['xarray', 'tifffile', 'imagecodecs', 'matplotlib']
     },
     # ext_modules=ext_modules,
     # options=options,
-    zip_safe=False,
     platforms=['any'],
     classifiers=[
         'Development Status :: 4 - Beta',
@@ -152,7 +148,6 @@ setup(
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
         'Programming Language :: Python :: 3 :: Only',
-        'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
