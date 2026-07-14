@@ -129,13 +129,13 @@ setup(
     project_urls={
         'Bug Tracker': 'https://github.com/cgohlke/liffile/issues',
         'Source Code': 'https://github.com/cgohlke/liffile',
-        # 'Documentation': 'https://',
+        'Documentation': 'https://www.cgohlke.com/docs/liffile',
     },
     packages=['liffile'],
     package_data={'liffile': ['py.typed']},
     entry_points={'console_scripts': ['liffile = liffile.__main__:main']},
     python_requires='>=3.12',
-    install_requires=['numpy'],
+    install_requires=['numpy>=2.1'],
     extras_require={
         'all': ['xarray', 'tifffile', 'imagecodecs', 'matplotlib']
     },
@@ -151,5 +151,6 @@ setup(
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
+        'Programming Language :: Python :: 3.15',
     ],
 )
