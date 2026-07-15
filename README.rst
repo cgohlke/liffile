@@ -12,7 +12,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.4.11
+:Version: 2026.7.14
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -34,17 +34,23 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.14, 3.14.6, 3.15.0b3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.5.1
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.26
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.7.14
   (required for reading multi-page TIFF)
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.0 (optional)
 
 Revisions
 ---------
+
+2026.7.14
+
+- Add option to memory-map LIF files.
+- Drop support for numpy 2.0 (SPEC0).
+- Support Python 3.15.
 
 2026.4.11
 
@@ -90,22 +96,6 @@ Revisions
 - Drop support for Python 3.10.
 
 2025.5.10
-
-- Support Python 3.14.
-
-2025.4.12
-
-- Improve case_sensitive_path function.
-
-2025.3.8
-
-- Support LOF files without LMSDataContainerHeader XML element.
-
-2025.3.6
-
-- Support stride-aligned RGB images.
-
-2025.2.20
 
 - …
 
