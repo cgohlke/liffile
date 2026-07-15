@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.4.11
+:Version: 2026.7.14
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -61,17 +61,23 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.14, 3.14.6, 3.15.0b3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.5.1
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.26
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.7.14
   (required for reading multi-page TIFF)
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.0 (optional)
 
 Revisions
 ---------
+
+2026.7.14
+
+- Add option to memory-map LIF files.
+- Drop support for numpy 2.0 (SPEC0).
+- Support Python 3.15.
 
 2026.4.11
 
@@ -117,22 +123,6 @@ Revisions
 - Drop support for Python 3.10.
 
 2025.5.10
-
-- Support Python 3.14.
-
-2025.4.12
-
-- Improve case_sensitive_path function.
-
-2025.3.8
-
-- Support LOF files without LMSDataContainerHeader XML element.
-
-2025.3.6
-
-- Support stride-aligned RGB images.
-
-2025.2.20
 
 - …
 
@@ -228,7 +218,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.4.11'
+__version__ = '2026.7.14'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -254,23 +244,24 @@ import io
 import itertools
 import logging
 import math
+import mmap
 import os
 import re
 import struct
 import sys
+import threading
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cached_property, lru_cache
-from types import MappingProxyType
 from typing import TYPE_CHECKING, final, overload, override
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Iterable, Iterator, Mapping
+    from collections.abc import Container, Iterable, Iterator
     from types import TracebackType
     from typing import IO, Any, ClassVar, Literal, Self
 
@@ -297,6 +288,7 @@ def imread(
     image: int | str = 0,
     *,
     selection: SelectionType | None = None,
+    memmap: bool = False,
     squeeze: bool = True,
     asxarray: Literal[False] = ...,
     out: OutputType = None,
@@ -311,6 +303,7 @@ def imread(
     image: int | str = 0,
     *,
     selection: SelectionType | None = None,
+    memmap: bool = False,
     squeeze: bool = True,
     asxarray: Literal[True] = ...,
     out: OutputType = None,
@@ -324,6 +317,7 @@ def imread(
     image: int | str = 0,
     *,
     selection: SelectionType | None = None,
+    memmap: bool = False,
     squeeze: bool = True,
     asxarray: bool = False,
     out: OutputType = None,
@@ -350,6 +344,10 @@ def imread(
             - ``None``: All indices.
 
             Not supported with RAW FLIM images.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
         squeeze:
             Remove dimensions of length one from images.
         asxarray:
@@ -371,7 +369,7 @@ def imread(
             Image data as numpy array or xarray DataArray.
 
     """
-    with LifFile(file, squeeze=squeeze) as lif:
+    with LifFile(file, memmap=memmap, squeeze=squeeze) as lif:
         im = lif.images[image]
 
         if selection is None:
@@ -425,9 +423,19 @@ class BinaryFile:
         file:
             File name or seekable binary stream.
         mode:
-            File open mode if `file` is a file name.
-            If not specified, defaults to 'r'. Files are always opened
+            File open mode if ``file`` is a file name.
+            If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
+
+    Notes:
+        Memory mapping can improve random-access read performance on large
+        files or repeated reads of the same file regions by reducing syscall
+        overhead and data copying.
+        For sequential one-pass reads, regular buffered I/O may be faster.
 
     Raises:
         TypeError:
@@ -439,10 +447,14 @@ class BinaryFile:
     """
 
     _fh: IO[bytes]
+    _mm: mmap.mmap | None
+    _mv: memoryview | None  # view of _mm
     _path: str  # absolute path of file
     _name: str  # name of file or handle
     _close: bool  # file needs to be closed
     _closed: bool  # file is closed
+    _memmap: bool  # open companion files using memmap
+    _lock: contextlib.AbstractContextManager[Any]
     _ext: ClassVar[set[str]] = set()  # valid extensions, empty for any
 
     def __init__(
@@ -451,12 +463,17 @@ class BinaryFile:
         /,
         *,
         mode: Literal['r', 'r+'] | None = None,
+        memmap: bool = False,
     ) -> None:
 
+        self._mm = None
+        self._mv = None
         self._path = ''
         self._name = 'Unnamed'
         self._close = False
         self._closed = False
+        self._memmap = bool(memmap)
+        self._lock = contextlib.nullcontext()
 
         if isinstance(file, (str, os.PathLike)):
             ext = os.path.splitext(file)[-1].lower()
@@ -520,6 +537,23 @@ class BinaryFile:
         else:
             self._name = type(file).__name__
 
+        if memmap:
+            _fh: Any = self._fh
+            if isinstance(_fh, mmap.mmap):
+                self._mm = _fh
+                self._mv = memoryview(self._mm)
+            else:
+                try:
+                    access = (
+                        mmap.ACCESS_WRITE
+                        if self._fh.writable()
+                        else mmap.ACCESS_READ
+                    )
+                    self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
+                    self._mv = memoryview(self._mm)
+                except OSError:
+                    pass
+
     @property
     def filehandle(self) -> IO[bytes]:
         """File handle."""
@@ -527,17 +561,17 @@ class BinaryFile:
 
     @property
     def filepath(self) -> str:
-        """Absolute path to file, or empty string if unavailable."""
+        """Absolute path to file, or empty string if no path is available."""
         return self._path
 
     @property
     def filename(self) -> str:
-        """Name of file, or empty if no path is available."""
+        """Basename of file path, or empty string if no path is available."""
         return os.path.basename(self._path)
 
     @property
     def dirname(self) -> str:
-        """Directory containing file, or empty if no path is available."""
+        """Directory containing file, or empty string if no path available."""
         return os.path.dirname(self._path)
 
     @property
@@ -550,9 +584,207 @@ class BinaryFile:
         self._name = value
 
     @property
-    def attrs(self) -> Mapping[str, Any]:
+    def attrs(self) -> dict[str, Any]:
         """Selected metadata as dict."""
-        return MappingProxyType({'name': self.name, 'filepath': self.filepath})
+        return {'name': self.name, 'filepath': self.filepath}
+
+    @property
+    def lock(self) -> contextlib.AbstractContextManager[Any]:
+        """Lock for thread-safe file access."""
+        return self._lock
+
+    def set_lock(self, enabled: bool, /) -> None:  # noqa: FBT001
+        """Enable or disable thread-safe file access.
+
+        Parameters:
+            enabled:
+                If true, use a threading.RLock, else a no-op lock.
+                Has no effect when memory-mapped I/O is active.
+
+        """
+        if self._mm is not None:
+            return
+        self._lock = threading.RLock() if enabled else contextlib.nullcontext()
+
+    def _write_at(
+        self, offset: int, data: bytes | bytearray | memoryview, /
+    ) -> None:
+        """Write bytes to file at given offset.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            data: Data to write.
+
+        """
+        if self._mm is not None and self.writable:
+            # writable mmap: direct slice write, no cursor movement
+            self._mm[offset : offset + len(data)] = data
+        else:
+            with self._lock:
+                self._fh.seek(offset)
+                self._fh.write(data)
+
+    def _read_at(self, offset: int, size: int, /) -> bytes | memoryview:
+        """Read bytes from file at given offset.
+
+        For memory-mapped files, returned bytes are exposed as a
+        ``memoryview`` of the mapping. Keeping that view alive may keep
+        the memory map (and associated file resources/lock) alive.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            size: Number of bytes to read.
+
+        """
+        mv = self._mv
+        if mv is not None:
+            return mv[offset : offset + size]
+        fh = self._fh
+        with self._lock:
+            fh.seek(offset)
+            return fh.read(size)
+
+    def _read_into(self, offset: int, buffer: NDArray[numpy.uint8], /) -> int:
+        """Read bytes from file at given offset into existing buffer.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            buffer: Flat, writable uint8 numpy array to read into.
+
+        Returns:
+            Number of bytes read.
+
+        """
+        nbytes = len(buffer)
+        mv = self._mv
+        if mv is not None:
+            n = min(nbytes, max(0, len(mv) - offset))
+            buffer[:n] = numpy.frombuffer(mv[offset : offset + n], numpy.uint8)
+            return n
+
+        fh = self._fh
+        with self._lock:
+            fh.seek(offset)
+            try:
+                return fh.readinto(buffer)  # type: ignore[attr-defined, no-any-return]
+            except (AttributeError, OSError):
+                data = fh.read(nbytes)
+                buffer[:] = numpy.frombuffer(data, numpy.uint8)
+                return len(data)
+
+    def _read_array(
+        self,
+        offset: int,
+        count: int,
+        dtype: DTypeLike,
+        *,
+        copy: bool = False,
+        writable: bool = False,
+        truncate: bool | None = False,
+    ) -> NDArray[Any]:
+        """Read numpy array from file at given offset.
+
+        For memory-mapped files, returned data are exposed directly as a
+        NumPy array view of the mapping (zero copy). Keeping that array alive
+        may keep the memory map (and associated file resources/lock) alive.
+
+        Parameters:
+            offset:
+                Byte offset from start of file.
+            count:
+                Number of elements to read. If ``-1``, read to end of file.
+            dtype:
+                Array element type.
+            copy:
+                If true, always return a detached copy in main memory.
+                For memory-mapped files, bypass the direct-view fast path.
+            writable:
+                By default, return read-only array from memory-mapped file.
+                Prevents accidental modification of underlying writable file.
+                Has no effect for non-memory-mapped files (always writable).
+            truncate:
+                Allow partial reads of array.
+                If None, log error on partial read.
+
+        """
+        dtype = numpy.dtype(dtype)
+        itemsize = dtype.itemsize
+        if offset < 0:
+            msg = f'{offset=} < 0'
+            raise ValueError(msg)
+        if count < -1:
+            msg = f'{count=} < -1'
+            raise ValueError(msg)
+
+        mv = self._mv
+        if mv is not None:
+            if count == -1:
+                count = max(0, (len(mv) - offset) // itemsize)
+            nbytes = count * itemsize
+            size = min(nbytes, max(0, len(mv) - offset))
+            n = size - size % itemsize
+            array = numpy.frombuffer(
+                mv[offset : offset + n],
+                dtype,
+            )
+            if copy:
+                array = array.copy()
+            elif not writable and array.flags.writeable:
+                array.flags.writeable = False
+        elif count > -1:
+            fh = self._fh
+            nbytes = count * itemsize
+            array = numpy.empty(count, dtype)
+            with self._lock:
+                fh.seek(offset)
+                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+        else:
+            fh = self._fh
+            with self._lock:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                count = max(0, (size - offset) // itemsize)
+                nbytes = count * itemsize
+                array = numpy.empty(count, dtype)
+                fh.seek(offset)
+                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+
+        if n != nbytes:
+            array = array[: n // itemsize]
+            msg = f'expected {count} items, got {n // itemsize}'
+            if truncate is None:
+                logging.getLogger(__name__.split('.', 1)[0]).error(msg)
+            elif not truncate:
+                raise ValueError(msg)
+
+        return array
+
+    @cached_property
+    def filesize(self) -> int:
+        """Size of file in bytes."""
+        if self._mm is not None:
+            return len(self._mm)
+        fh = self._fh
+        try:
+            return os.fstat(fh.fileno()).st_size
+        except (AttributeError, io.UnsupportedOperation, OSError):
+            pass
+        with self._lock:
+            pos = fh.tell()
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(pos)
+        return size
+
+    @property
+    def writable(self) -> bool:
+        """File is open for writing."""
+        return self._fh.writable()
+
+    @property
+    def memmapped(self) -> bool:
+        """File is memory-mapped."""
+        return self._mm is not None
 
     @property
     def closed(self) -> bool:
@@ -562,6 +794,10 @@ class BinaryFile:
     def close(self) -> None:
         """Close file."""
         self._closed = True  # always report file as closed
+        self._mv = None  # do not release(), threads may hold local refs
+        if self._mm is not None and self._mm is not self._fh:  # type: ignore[comparison-overlap]
+            with contextlib.suppress(Exception):
+                self._mm.close()
         if self._close:
             with contextlib.suppress(Exception):
                 self._fh.close()
@@ -594,8 +830,13 @@ class LifFile(BinaryFile):
         file:
             Name of Leica image file or seekable binary stream.
         mode:
-            File open mode if `file` is file name.
-            The default is 'r'. Files are always opened in binary mode.
+            File open mode if ``file`` is a file name.
+            If not specified, defaults to ``'r'``. Files are always opened
+            in binary mode.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
         squeeze:
             Remove dimensions of length one from images.
         _parent:
@@ -631,11 +872,12 @@ class LifFile(BinaryFile):
         file: str | os.PathLike[Any] | IO[bytes],
         /,
         *,
-        squeeze: bool = True,
         mode: Literal['r', 'r+'] | None = None,
+        memmap: bool = False,
+        squeeze: bool = True,
         _parent: LifFile | None = None,
     ) -> None:
-        super().__init__(file, mode=mode)
+        super().__init__(file, mode=mode, memmap=memmap)
 
         self._parent = _parent
         self._squeeze = bool(squeeze)
@@ -649,7 +891,7 @@ class LifFile(BinaryFile):
 
         try:
             self._init()
-        except Exception:
+        except BaseException:
             self.close()
             raise
 
@@ -835,7 +1077,12 @@ class LifFile(BinaryFile):
             if not os.path.exists(filename):
                 filename = case_sensitive_path(filename)
             children.append(
-                LifFile(filename, squeeze=self._squeeze, _parent=self)
+                LifFile(
+                    filename,
+                    memmap=self._memmap,
+                    squeeze=self._squeeze,
+                    _parent=self,
+                )
             )
         return tuple(children)
 
@@ -847,14 +1094,15 @@ class LifFile(BinaryFile):
     def xml_header(self) -> str:
         """Return XML object description from file."""
         xml: str | bytes
-
-        if self._path and self._fh.closed:
+        if self._path and self._fh.closed and os.path.isfile(self._path):
             with open(self._path, 'rb') as fh:
                 fh.seek(self._xml_header[0])
                 xml = fh.read(self._xml_header[1])
         else:
-            self._fh.seek(self._xml_header[0])
-            xml = self._fh.read(self._xml_header[1])
+            # TODO: this fails with closed remote file handles
+            xml = bytes(
+                self._read_at(self._xml_header[0], self._xml_header[1])
+            )
         if self._xml_header[1] < 0:
             return xml.decode(XML_CODEC[xml[:4]])
         return xml.decode('utf-16-le')
@@ -1377,7 +1625,11 @@ class LifImage(LifImageABC):
             path = os.path.join(self.parent.dirname, memblock.frames[0].file)
             if not os.path.exists(path):
                 path = case_sensitive_path(path)
-            lof = LifFile(path, squeeze=self.parent._squeeze)
+            lof = LifFile(
+                path,
+                memmap=self.parent._memmap,
+                squeeze=self.parent._squeeze,
+            )
             self.parent._open_files.append(lof)
             return lof
         return None
@@ -1715,7 +1967,11 @@ class LifImage(LifImageABC):
             )
             data = data[tuple(slice(size) for size in self.shape)]
         if self._is_bgr:
-            data[:] = data[..., ::-1]  # BGR to RGB
+            # BGR to RGB
+            if not data.flags.writeable:
+                data = data[..., ::-1].copy()
+            else:
+                data[:] = data[..., ::-1]
         return data
 
 
@@ -2004,7 +2260,7 @@ class LifImageFrames:
                     # iterate all
                     iter_sizes.append(size)
                     iter_ranges.append(range(size))
-                case int() | numpy.integer():
+                case _ if isinstance(sel, (int, numpy.integer)):
                     # fixed index
                     if not 0 <= sel < size:
                         msg = (
@@ -2085,7 +2341,7 @@ class LifImageFrames:
 
         Parameters:
             out:
-                Output array or 'memmap'.
+                Output array or ``'memmap'``.
             **indices:
                 Global dimension indices (unspecified default to 0).
 
@@ -2190,15 +2446,11 @@ class LifImageFrames:
             msg = 'memory block has no offset and no frames'
             raise ValueError(msg)
 
-        fh = image.parent.filehandle
-        fh.seek(memblock.offset + offset)
-        buffer = fh.read(frame_nbytes)
-        if len(buffer) != frame_nbytes:
-            msg = f'read {len(buffer)} bytes, expected {frame_nbytes}'
-            raise OSError(msg)
-
+        data = image.parent._read_array(
+            memblock.offset + offset, product(frame_shape), dtype
+        )
         result = create_output(out, frame_shape, dtype)
-        result[:] = numpy.frombuffer(buffer, dtype=dtype).reshape(frame_shape)
+        result[:] = data.reshape(frame_shape)
         if image._is_bgr:
             result[:] = result[..., ::-1]  # BGR to RGB
         return result
@@ -2379,7 +2631,7 @@ class LifImageFrames:
                     match sel:
                         case None:
                             result[dim] = coord_array
-                        case int() | numpy.integer():
+                        case _ if isinstance(sel, (int, numpy.integer)):
                             result[dim] = coord_array[sel : sel + 1]
                         case slice():
                             result[dim] = coord_array[sel]
@@ -2455,7 +2707,7 @@ class LifImageFrames:
 
         Parameters:
             out:
-                Output array or 'memmap'.
+                Output array or ``'memmap'``.
 
         Returns:
             Array with :py:attr:`shape` and :py:attr:`dtype`.
@@ -2502,8 +2754,8 @@ class LifImageFrames:
             linear_index:
                 Linear index (0 to len-1).
             global_:
-                If True, return global (absolute) indices.
-                If False, return local (selection-relative) indices.
+                If ``True``, return global (absolute) indices.
+                If ``False``, return local (selection-relative) indices.
 
         Returns:
             ND index as tuple, excluding frame dimensions.
@@ -2555,8 +2807,9 @@ class LifImageFrames:
             nd_index:
                 ND index as tuple, excluding frame dimensions.
             global_:
-                If True, nd_index contains global (absolute) indices.
-                If False, nd_index contains local (selection-relative) indices.
+                If ``True``, nd_index contains global (absolute) indices.
+                If ``False``, nd_index contains local (selection-relative)
+                indices.
 
         Returns:
             Linear index.
@@ -2809,7 +3062,7 @@ class LifImageSeries(Sequence[LifImageABC]):
             key:
                 Regular expression pattern to match str of LifImage attribute.
             attr:
-                LifImage attribute to match against (default: 'path').
+                LifImage attribute to match against (default: ``'path'``).
             flags:
                 Regular expression flags.
             default:
@@ -2837,7 +3090,7 @@ class LifImageSeries(Sequence[LifImageABC]):
             key:
                 Regular expression pattern to match str of LifImage attribute.
             attr:
-                LifImage attribute to match against (default: 'path').
+                LifImage attribute to match against (default: ``'path'``).
             flags:
                 Regular expression flags.
 
@@ -3055,17 +3308,40 @@ class LifMemoryBlock:
         self.offset = offset
         self.size = size
 
-    def read(self, /) -> bytes:
-        """Return memory block from file."""
-        buffer: bytes | bytearray
+    @overload
+    def read(self, /, *, copy: Literal[True] = ...) -> bytes: ...
+
+    @overload
+    def read(
+        self, /, *, copy: Literal[False]
+    ) -> bytes | bytearray | memoryview: ...
+
+    @overload
+    def read(self, /, *, copy: bool) -> bytes | bytearray | memoryview: ...
+
+    def read(self, /, *, copy: bool = True) -> bytes | bytearray | memoryview:
+        """Return memory block from file.
+
+        Parameters:
+            copy:
+                Return detached bytes copy.
+                If False, return a zero-copy ``memoryview`` for memory-mapped
+                files, a ``bytearray`` for external frame blocks, or ``bytes``
+                otherwise.
+
+        Returns:
+            Memory block data.
+
+        """
+        buffer: bytes | bytearray | memoryview
 
         if len(self.frames) == 1 and self.frames[0].file.endswith('.lof'):
             # allow reading FLIM data from LOF file
             path = os.path.join(self.parent.dirname, self.frames[0].file)
             if not os.path.exists(path):
                 path = case_sensitive_path(path)
-            with LifFile(path) as lof:
-                return lof.images[0].memory_block.read()
+            with LifFile(path, memmap=self.parent._memmap) as lof:
+                return lof.images[0].memory_block.read(copy=copy)
 
         if len(self.frames) > 0:
             dirname = self.parent.dirname
@@ -3073,14 +3349,13 @@ class LifMemoryBlock:
             for frame in self.frames:
                 im = frame.imread(dirname)
                 buffer[frame.offset : frame.offset + frame.size] = im.tobytes()
-            return bytes(buffer)
+            return bytes(buffer) if copy else buffer
 
-        self.parent.filehandle.seek(self.offset)
-        buffer = self.parent.filehandle.read(self.size)
+        buffer = self.parent._read_at(self.offset, self.size)
         if len(buffer) != self.size:
             msg = f'read {len(buffer)} bytes, expected {self.size}'
             raise OSError(msg)
-        return buffer
+        return bytes(buffer) if copy else buffer
 
     def readinto(self, buffer: NDArray[Any], /) -> None:
         """Read memory block from file into contiguous ndarray."""
@@ -3099,15 +3374,7 @@ class LifMemoryBlock:
                 buffer[frame.offset : frame.offset + frame.size] = im
             return
 
-        fh = self.parent.filehandle
-        fh.seek(self.offset)
-        try:
-            nbytes = fh.readinto(buffer)  # type: ignore[attr-defined]
-        except (AttributeError, OSError):
-            data = fh.read(self.size)
-            nbytes = len(data)
-            buffer[:] = numpy.frombuffer(data, numpy.uint8)
-
+        nbytes = self.parent._read_into(self.offset, buffer)
         if nbytes != self.size:
             msg = f'read {nbytes} bytes, expected {self.size}'
             raise OSError(msg)
@@ -3136,7 +3403,7 @@ class LifMemoryBlock:
                 file if possible; else create a memory-mapped array in a
                 temporary file.
                 If a ``numpy.ndarray``, a writable, initialized array
-                of `shape` and `dtype`.
+                of ``shape`` and ``dtype``.
                 If a ``file name`` or ``open file``, create a
                 memory-mapped array in the specified file.
 
@@ -3170,6 +3437,11 @@ class LifMemoryBlock:
             data = self.frames[0].imread(self.parent.dirname)
             # create view in case float16 are stored as uint16 in TIFF
             return data.view(dtype).reshape(shape)
+
+        if out is None and self.offset >= 0:
+            return self.parent._read_array(
+                self.offset, product(shape), dtype
+            ).reshape(shape)
 
         data = create_output(out, shape, dtype)
         if data.nbytes != nbytes:
@@ -3507,39 +3779,40 @@ def create_output(
 
     Parameters:
         out:
-            Specifies kind of array of `shape` and `dtype` to return:
+            Specifies kind of array of ``shape`` and ``dtype`` to return:
 
-                `None`:
+                ``None``:
                     Return new array.
-                `numpy.ndarray`:
+                ``numpy.ndarray``:
                     Return view of existing array.
-                `'memmap'` or `'memmap:tempdir'`:
+                ``'memmap'`` or ``'memmap:tempdir'``:
                     Return memory-map to array stored in temporary binary file.
-                `str` or open file:
+                ``str`` or open file:
                     Return memory-map to array stored in specified binary file.
         shape:
             Shape of array to return.
         dtype:
             Data type of array to return.
-            If `out` is an existing array, `dtype` must be castable to its
+            If ``out`` is an existing array, ``dtype`` must be castable to its
             data type.
         mode:
             File mode to create memory-mapped array.
-            The default is 'w+' to create new, or overwrite existing file for
-            reading and writing.
+            The default is ``'w+'`` to create new, or overwrite existing file
+            for reading and writing.
         suffix:
-            Suffix of `NamedTemporaryFile` if `out` is `'memmap'`.
-            The default is '.memmap'.
+            Suffix of ``NamedTemporaryFile`` if ``out`` is ``'memmap'``.
+            The default is ``'.memmap'``.
         fillvalue:
             Value to initialize output array.
             By default, return uninitialized array.
 
     Returns:
-        NumPy array or memory-mapped array of `shape` and `dtype`.
+        NumPy array or memory-mapped array of ``shape`` and ``dtype``.
 
     Raises:
         ValueError:
-            Existing array cannot be reshaped to `shape` or cast to `dtype`.
+            Existing array cannot be reshaped to ``shape``
+            or cast to ``dtype``.
 
     """
     shape = tuple(shape)
@@ -3558,7 +3831,7 @@ def create_output(
             msg = f'cannot cast {dtype} to {out.dtype}'
             raise ValueError(msg)
         if out.shape != shape:
-            out = out.reshape(shape)
+            out = out.reshape(shape, copy=False)
         if fillvalue is not None:
             out.fill(fillvalue)
         return out
