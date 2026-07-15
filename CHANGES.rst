@@ -1,6 +1,12 @@
 Revisions
 =========
 
+2026.7.14
+
+- Add option to memory-map LIF files.
+- Drop support for numpy 2.0 (SPEC0).
+- Support Python 3.15.
+
 2026.4.11
 
 - Add channel name resolution to LifImage via coords['C'] and coords['S'].
