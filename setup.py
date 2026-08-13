@@ -1,5 +1,9 @@
 # liffile/setup.py
 
+# Copyright (c) Christoph Gohlke
+# SPDX-License-Identifier: BSD-3-Clause
+# See LICENSE file in the project root for details.
+
 """Liffile package Setuptools script."""
 
 import os
@@ -129,7 +133,7 @@ setup(
     project_urls={
         'Bug Tracker': 'https://github.com/cgohlke/liffile/issues',
         'Source Code': 'https://github.com/cgohlke/liffile',
-        'Documentation': 'https://www.cgohlke.com/docs/liffile',
+        'Documentation': 'https://www.cgohlke.com/docs/liffile/',
     },
     packages=['liffile'],
     package_data={'liffile': ['py.typed']},
