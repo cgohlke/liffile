@@ -1,6 +1,10 @@
 Revisions
 =========
 
+2026.10.3
+
+- Do not remove images with duplicate paths (bioio-lif issue 55).
+
 2026.7.14
 
 - Add option to memory-map LIF files.
