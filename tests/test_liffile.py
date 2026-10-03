@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.7.14
+:Version: 2026.10.3
 
 """
 
@@ -2616,6 +2616,47 @@ def test_frames_unravel_ravel():
         # global index not in sequence
         with pytest.raises(IndexError):
             frames_seq.ravel_multi_index((1,), global_=True)
+
+
+@pytest.mark.parametrize('squeeze', [True, False])
+def test_lif_single_tile(squeeze):
+    """Test LIF file with single tile."""
+    # file has tile scan metadata but no M dimension
+    filename = DATA / 'bioio-lif/single_tile_scan.lif'
+    with LifFile(filename, squeeze=squeeze) as lif:
+        str(lif)
+        assert lif.type == LifFileType.LIF
+        assert len(lif.images) == 3
+        path = lif.images[0].path
+        for image in lif.images:
+            str(image)
+            assert image.sizes == {'C': 3, 'Y': 1024, 'X': 1024}
+            assert image.tilescan is not None
+
+        assert lif.images.find(path) is lif.images[0]
+        assert len(lif.images.findall(path)) == 3
+        assert len(lif.images.findall(path + '$')) == 1  # no duplicates
+
+
+def test_lif_duplicate_paths():
+    """Test LIF file with images of same path."""
+    # file was patched manually to rename image paths to be the same
+    filename = DATA / 'bioio-lif/single_tile_scan_duplicates.lif'
+    with LifFile(filename) as lif:
+        str(lif)
+        assert lif.type == LifFileType.LIF
+        assert len(lif.images) == 3
+        path = lif.images[0].path
+        for image in lif.images:
+            str(image)
+            assert image.sizes == {'C': 3, 'Y': 1024, 'X': 1024}
+            assert image.path == path
+
+        assert lif.images.find(path) is lif.images[0]
+        assert len(lif.images.findall(path)) == 3
+        assert len(lif.images.findall(path + '$')) == 3  # includes duplicates
+        for image in lif.images.findall(path + '$'):
+            assert image.path == path
 
 
 @pytest.mark.parametrize(
