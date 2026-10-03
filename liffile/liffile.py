@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.7.14
+:Version: 2026.10.3
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -50,7 +50,12 @@ Install the liffile package and all dependencies from the
 
     python -m pip install -U liffile[all]
 
-See `Examples`_ for using the programming interface.
+View image and metadata stored in a LIF file::
+
+    python -m liffile file.lif
+
+See `Examples`_ and `Documentation <https://www.cgohlke.com/docs/liffile/>`_
+for using the programming interface.
 
 Source code and support are available on
 `GitHub <https://github.com/cgohlke/liffile>`_.
@@ -61,17 +66,21 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.14, 3.14.6, 3.15.0b3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.5.1
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.26
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0rc 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.3
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.8.16
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.7.14
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.9.20
   (required for reading multi-page TIFF)
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.0 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
 
 Revisions
 ---------
+
+2026.10.3
+
+- Do not remove images with duplicate paths (bioio-lif issue 55).
 
 2026.7.14
 
@@ -168,6 +177,10 @@ Other implementations for reading Leica image files are
 Examples
 --------
 
+Import functions and classes used in these examples:
+
+>>> from liffile import LifFile
+
 Read a FLIM lifetime image and metadata from a LIF file:
 
 >>> with LifFile('tests/data/FLIM.lif') as lif:
@@ -218,7 +231,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.7.14'
+__version__ = '2026.10.3'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -250,6 +263,7 @@ import re
 import struct
 import sys
 import threading
+import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -3003,6 +3017,21 @@ class LifImageSeries(Sequence[LifImageABC]):
                     image = LifImage(parent, element, path_)
                 else:
                     image = LifFlimImage(parent, element, path_)
+                # LAS X usually refuses to write images with duplicate paths.
+                # However, paths from XML may in principle collide, hence the
+                # renaming logic, which is opaque to users.
+                if path_ in self._images:
+                    for i in range(1, 1000):
+                        # this loop generates readable keys;
+                        # remove if performance becomes an issue
+                        new_path = f'{path_}~{i:03}'
+                        if new_path not in self._images:
+                            path_ = new_path
+                            break
+                    else:
+                        # fall back to uuid;
+                        # image.uuid cannot be used because it may be None
+                        path_ = f'{path_}_{uuid.uuid4().hex}'
                 self._images[path_] = image
 
         for child in parent.children:
