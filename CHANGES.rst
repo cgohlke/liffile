@@ -1,6 +1,10 @@
 Revisions
 =========
 
+2026.10.8
+
+- Support XLLF (folder view) files.
+
 2026.10.3
 
 - Do not remove images with duplicate paths (bioio-lif issue 55).
