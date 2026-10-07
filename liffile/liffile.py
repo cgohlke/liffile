@@ -29,17 +29,18 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read Leica image files (LIF, LOF, XLIF, XLCF, XLEF, and LIFEXT).
+"""Read Leica image files (LIF, LOF, XLIF, XLEF, XLCF, XLLF, and LIFEXT).
 
 Liffile is a Python library to read image and metadata from Leica image files:
 LIF (Leica Image File), LOF (Leica Object File), XLIF (XML Image File),
-XLCF (XML Collection File), XLEF (XML Experiment File), and LIFEXT (Leica
-Image File Extension). These files are written by LAS X software to store
-collections of images and metadata from microscopy experiments.
+XLCF (XML Collection File), XLEF (XML Experiment File), XLLF (XML Folder
+View File), and LIFEXT (Leica Image File Extension). These files are written
+by LAS X software to store collections of images and metadata from microscopy
+experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.3
+:Version: 2026.10.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -49,10 +50,6 @@ Install the liffile package and all dependencies from the
 `Python Package Index <https://pypi.org/project/liffile/>`_::
 
     python -m pip install -U liffile[all]
-
-View image and metadata stored in a LIF file::
-
-    python -m liffile file.lif
 
 See `Examples`_ and `Documentation <https://www.cgohlke.com/docs/liffile/>`_
 for using the programming interface.
@@ -77,6 +74,10 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.10.8
+
+- Support XLLF (folder view) files.
 
 2026.10.3
 
@@ -112,27 +113,6 @@ Revisions
 
 2026.1.14
 
-- Improve code quality.
-
-2025.12.12
-
-- Remove deprecated LifFile.series and xml_element_smd properties (breaking).
-- Improve code quality.
-
-2025.11.8
-
-- Add option to find other LifImageSeries attributes than path.
-- Return UniqueID in LifImage.attrs.
-- Factor out BinaryFile base class.
-
-2025.9.28
-
-- Derive LifFileError from ValueError.
-- Minor fixes.
-- Drop support for Python 3.10.
-
-2025.5.10
-
 - …
 
 Refer to the CHANGES file for older revisions.
@@ -157,7 +137,7 @@ Related formats include LOF (single-object variant), XLIF, XLEF, and XLCF
 extensions).
 
 This library is not feature-complete. Unsupported features currently include
-XLLF, image mosaics and pyramids, bit increments, and non-image data such as
+image mosaics and pyramids, bit increments, and non-image data such as
 raw FLIM/TCSPC histogram data.
 
 The library has been tested with only a limited number of version 2 files.
@@ -231,7 +211,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.10.3'
+__version__ = '2026.10.8'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -833,7 +813,7 @@ class BinaryFile:
 
 @final
 class LifFile(BinaryFile):
-    """Leica image file (LIF, LOF, XLIF, XLEF, XLCF, or LIFEXT).
+    """Leica image file (LIF, LOF, XLIF, XLEF, XLCF, XLLF, and LIFEXT).
 
     ``LifFile`` instances are not thread-safe. All attributes are read-only.
 
@@ -913,6 +893,7 @@ class LifFile(BinaryFile):
             LifFileType.XLIF,
             LifFileType.XLEF,
             LifFileType.XLCF,
+            LifFileType.XLLF,
         }:
             with contextlib.suppress(Exception):
                 self._fh.close()
@@ -1053,7 +1034,13 @@ class LifFile(BinaryFile):
             if element.find('./Data/Collection') is not None:
                 self.type = LifFileType.XLCF
             elif element.find('./Data/Experiment') is not None:
-                self.type = LifFileType.XLEF
+                if self._path.lower().endswith('.xllf') or any(
+                    a.text == '__IOManagerFolderV2'
+                    for a in element.findall('./Attributes/Attribute')
+                ):
+                    self.type = LifFileType.XLLF
+                else:
+                    self.type = LifFileType.XLEF
             memblock = LifMemoryBlock(self)
             self.memory_blocks[memblock.id] = memblock
 
@@ -1079,7 +1066,7 @@ class LifFile(BinaryFile):
 
     @cached_property
     def children(self) -> tuple[LifFile, ...]:
-        """Children references in XLEF and XLCF files."""
+        """Children references in XLEF, XLCF, and XLLF files."""
         dirname = self.dirname
         children: list[LifFile] = []
         for child in self.xml_element.findall('./Element/Children/Reference'):
@@ -3009,7 +2996,11 @@ class LifImageSeries(Sequence[LifImageABC]):
         self._images = {}
         image: LifImageABC
 
-        if parent.type not in {LifFileType.XLEF, LifFileType.XLCF}:
+        if parent.type not in {
+            LifFileType.XLEF,
+            LifFileType.XLCF,
+            LifFileType.XLLF,
+        }:
             keepbase = parent.type == LifFileType.LIFEXT
             for path, element in self._image_iter(parent.xml_element):
                 path_ = path if keepbase else path.split('/', 1)[-1]
@@ -3037,7 +3028,7 @@ class LifImageSeries(Sequence[LifImageABC]):
         for child in parent.children:
             for image in child.images:
                 path = image.path
-                if parent.type != LifFileType.XLEF:
+                if parent.type not in {LifFileType.XLEF, LifFileType.XLLF}:
                     path = f'{parent.name}/{path}'
                 self._images[path] = image
                 image.path = path
@@ -3251,7 +3242,11 @@ class LifMemoryBlock:
         self.size = 0
         self.frames = ()
 
-        if parent.type in {LifFileType.XLEF, LifFileType.XLCF}:
+        if parent.type in {
+            LifFileType.XLEF,
+            LifFileType.XLCF,
+            LifFileType.XLLF,
+        }:
             return
 
         if parent.type == LifFileType.XLIF:
@@ -3788,7 +3783,7 @@ FILE_EXTENSIONS = {
     '.xlif': LifFileType.XLIF,
     '.xlef': LifFileType.XLEF,
     '.xlcf': LifFileType.XLCF,
-    # '.xllf': LifFileType.XLLF,
+    '.xllf': LifFileType.XLLF,
     '.lifext': LifFileType.LIFEXT,
 }
 """Supported file extensions of Leica image files."""
