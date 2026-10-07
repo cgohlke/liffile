@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.10.3
+:Version: 2026.10.8
 
 """
 
@@ -50,8 +50,10 @@ from xml.etree import ElementTree
 import numpy
 import pytest
 import xarray
-from numpy.testing import assert_allclose, assert_array_equal
-from xarray import DataArray
+from numpy.testing import assert_allclose
+
+# NOTE: ``assert numpy.array_equal`` much faster than ``assert_array_equal``
+# from numpy.testing import assert_array_equal
 
 try:
     import fsspec
@@ -924,16 +926,16 @@ def _assert_frames(image: LifImage, expected: numpy.ndarray) -> None:
         assert len(seq_frames) == expected_seq
 
     # first frame should match
-    assert_array_equal(image.frame(), frames[0])
+    assert numpy.array_equal(image.frame(), frames[0])
 
     for frame in frames.values():
-        assert_array_equal(frame, frames[0])
+        assert numpy.array_equal(frame, frames[0])
         break
 
     # frames.asarray should match image.asarray()
     out = numpy.empty(frames.shape, frames.dtype)
     xout = frames.asxarray(out=out)
-    assert_array_equal(out, expected)
+    assert numpy.array_equal(out, expected)
     assert isinstance(xout, xarray.DataArray)
 
 
@@ -1453,7 +1455,7 @@ def test_imread(
         asxarray=asxarray,
     )
     if asxarray:
-        assert isinstance(data, DataArray)
+        assert isinstance(data, xarray.DataArray)
         assert data.sizes == expected_sizes
         data = data.data
     else:
@@ -1532,7 +1534,7 @@ def test_lif(filetype, scanmodes_file):
         assert im.shape == (7, 5, 2, 128, 128)
         assert im.dims == ('T', 'Z', 'C', 'Y', 'X')
         assert im.sizes == {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128}
-        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1'])
+        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 10.657])
         assert_allclose(im.coords['Z'][[0, -1]], [4.999881e-06, -5.000359e-06])
         assert_allclose(im.coords['Y'][[0, -1]], [-3.418137e-05, 3.658182e-04])
@@ -1560,13 +1562,13 @@ def test_lif(filetype, scanmodes_file):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert_array_equal(xdata.data, data)
+        assert numpy.array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
         assert xdata.shape == im.shape
         assert xdata.attrs == im.attrs
-        assert_array_equal(xdata.coords['T'], im.coords['T'])
+        assert numpy.array_equal(xdata.coords['T'], im.coords['T'])
 
         memory_block = im.memory_block
         str(im.memory_block)
@@ -1646,7 +1648,7 @@ def test_lof(memmap):
         assert im.shape == (2, 4, 3, 1200, 1600)
         assert im.dims == ('T', 'M', 'C', 'Y', 'X')
         assert im.sizes == {'T': 2, 'M': 4, 'C': 3, 'Y': 1200, 'X': 1600}
-        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1', 'Ch2'])
+        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1', 'Ch2'])
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 1.0])
         assert_allclose(im.coords['Y'][[0, -1]], [0.0, 0.00122755], atol=1e-4)
         assert_allclose(im.coords['X'][[0, -1]], [0.0, 0.00163707], atol=1e-4)
@@ -1677,13 +1679,13 @@ def test_lof(memmap):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert_array_equal(xdata.data, data)
+        assert numpy.array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
         assert xdata.shape == im.shape
         assert xdata.attrs == im.attrs
-        assert_array_equal(xdata.coords['T'], im.coords['T'])
+        assert numpy.array_equal(xdata.coords['T'], im.coords['T'])
 
         memory_block = im.memory_block
         str(im.memory_block)
@@ -1764,7 +1766,7 @@ def test_xlif(name, block_type, memmap):
         assert im.shape == (10, 2, 512, 512)
         assert im.dims == ('Z', 'C', 'Y', 'X')
         assert im.sizes == {'Z': 10, 'C': 2, 'Y': 512, 'X': 512}
-        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1'])
+        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(
             im.coords['Z'][[0, -1]], [-2.345302e-05, 1.786591e-05], atol=1e-4
         )
@@ -1793,13 +1795,13 @@ def test_xlif(name, block_type, memmap):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert_array_equal(xdata.data, data)
+        assert numpy.array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
         assert xdata.shape == im.shape
         assert xdata.attrs == im.attrs
-        assert_array_equal(xdata.coords['Z'], im.coords['Z'])
+        assert numpy.array_equal(xdata.coords['Z'], im.coords['Z'])
 
         memory_block = im.memory_block
         str(im.memory_block)
@@ -1939,7 +1941,7 @@ def test_xlef(name, memmap):
 
         xdata = im.asxarray()
         assert isinstance(xdata, xarray.DataArray)
-        assert_array_equal(xdata.data, data)
+        assert numpy.array_equal(xdata.data, data)
 
 
 def test_xlef_tmczyx():
@@ -2020,7 +2022,56 @@ def test_xlef_tmczyx():
 
         xdata = im.asxarray()
         assert isinstance(xdata, xarray.DataArray)
-        assert_array_equal(xdata.data, data)
+        assert numpy.array_equal(xdata.data, data)
+
+
+def test_xllf():
+    """Test XLLF folder-view file with XLIF children."""
+    filename = (
+        DATA
+        / 'figshare_23522880/DATA 2024 SPIII/gr1/1/leicametadata'
+        / 'LMSIOManagerFolder.xllf'
+    )
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+
+    with LifFile(filename) as xllf:
+        assert xllf.type == LifFileType.XLLF
+        assert xllf.parent is None
+        str(xllf)
+        assert xllf.filehandle.closed
+        assert xllf.filename == 'LMSIOManagerFolder.xllf'
+        assert xllf.version == 2
+        assert isinstance(xllf.xml_element, ElementTree.Element)
+        assert xllf.xml_header().startswith('<?xml version="1.0"')
+        assert xllf.uuid == 'f5e9d74a-d3e9-11f0-add2-c025a57b8626'
+        assert xllf.datetime is not None
+
+        assert len(xllf.children) == 3
+        for child in xllf.children:
+            assert child.type == LifFileType.XLIF
+            assert child.parent is xllf
+
+        series = xllf.images
+        str(series)
+        assert isinstance(series, LifImageSeries)
+        assert len(series) == 3
+
+        for image in series:
+            str(image)
+            assert isinstance(image, LifImage)
+            assert image.path == image.name
+            assert image.sizes == {'Y': 1440, 'X': 1920, 'S': 3}
+            assert image.dtype == numpy.uint8
+
+        im = series['Image008_Overlay001']
+        assert im.name == 'Image008_Overlay001'
+        assert im.path == 'Image008_Overlay001'
+
+        data = im.asarray()
+        assert isinstance(data, numpy.ndarray)
+        assert data.shape == (1440, 1920, 3)
+        assert data.dtype == numpy.uint8
 
 
 @pytest.mark.parametrize('memmap', [False, True])
@@ -2081,7 +2132,7 @@ def test_lifext(memmap):
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.sizes == {'M': 4, 'C': 2, 'Z': 5, 'Y': 300, 'X': 400}
-        assert_array_equal(im.coords['C'], ['Ch0', 'Ch1'])
+        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(im.coords['Z'][[0, -1]], [0.0, 7.19784e-05])
         assert im.attrs['path'] != im.parent.name + '/' + im.path
         assert im.timestamps is None
@@ -2098,7 +2149,7 @@ def test_lifext(memmap):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert_array_equal(xdata.data, data)
+        assert numpy.array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
@@ -2206,22 +2257,22 @@ def test_frame_method(memmap):
         # test default indices (all zeros)
         frame = image.frame()
         assert frame.shape == (1024, 1024)
-        assert_array_equal(frame, data[0, 0])
+        assert numpy.array_equal(frame, data[0, 0])
 
         # test specified indices
         frame = image.frame(C=1, Z=3)
         assert frame.shape == (1024, 1024)
-        assert_array_equal(frame, data[1, 3])
+        assert numpy.array_equal(frame, data[1, 3])
 
         # test partial indices (unspecified default to 0)
         frame = image.frame(Z=5)
-        assert_array_equal(frame, data[0, 5])
+        assert numpy.array_equal(frame, data[0, 5])
 
         # test out parameter
         out = numpy.zeros((1024, 1024), dtype=image.dtype)
         result = image.frame(C=2, Z=7, out=out)
         assert result is out
-        assert_array_equal(result, data[2, 7])
+        assert numpy.array_equal(result, data[2, 7])
 
         # test errors
         with pytest.raises(KeyError):
@@ -2319,7 +2370,7 @@ def test_frames_selection_types():
         assert len(image.coords['Z']) == 10
         assert len(image.coords['Y']) == 1024
         assert len(image.coords['X']) == 1024
-        assert_array_equal(
+        assert numpy.array_equal(
             image.coords['C'],
             ['ALEXA 405', 'ALEXA 488', 'ALEXA 488', 'ALEXA 555'],
         )
@@ -2328,9 +2379,9 @@ def test_frames_selection_types():
         assert 'Y' in frames.coords
         assert 'X' in frames.coords
         assert 'Z' in frames.coords
-        assert_array_equal(frames.coords['Z'], image.coords['Z'])
-        assert_array_equal(frames.coords['Y'], image.coords['Y'])
-        assert_array_equal(frames.coords['X'], image.coords['X'])
+        assert numpy.array_equal(frames.coords['Z'], image.coords['Z'])
+        assert numpy.array_equal(frames.coords['Y'], image.coords['Y'])
+        assert numpy.array_equal(frames.coords['X'], image.coords['X'])
 
         # int selection (fixed index)
         # C is fixed at 1, only Z iterates
@@ -2343,13 +2394,13 @@ def test_frames_selection_types():
         assert frames_c1._info.dims == ('Z',)
         assert frames_c1 is not frames  # selection returns new object
         # coords should be indexed: Z has all values, Y and X unchanged
-        assert_array_equal(frames_c1.coords['Z'], image.coords['Z'])
-        assert_array_equal(frames_c1.coords['Y'], image.coords['Y'])
-        assert_array_equal(frames_c1.coords['X'], image.coords['X'])
+        assert numpy.array_equal(frames_c1.coords['Z'], image.coords['Z'])
+        assert numpy.array_equal(frames_c1.coords['Y'], image.coords['Y'])
+        assert numpy.array_equal(frames_c1.coords['X'], image.coords['X'])
         for i, (nd_idx, frame) in enumerate(frames_c1.items()):
             assert nd_idx == (i,)  # local index
             # Convert to global: C=1 (fixed), Z=i (iterates 0..9)
-            assert_array_equal(frame, data[1, i])
+            assert numpy.array_equal(frame, data[1, i])
 
         # slice selection
         # Both C and Z specified with slices
@@ -2362,9 +2413,11 @@ def test_frames_selection_types():
         assert frames_slice._info.dims == ('C', 'Z')
         # coords should be sliced: Z has indices 2:5, Y and X unchanged
         assert len(frames_slice.coords['Z']) == 3
-        assert_array_equal(frames_slice.coords['Z'], image.coords['Z'][2:5])
-        assert_array_equal(frames_slice.coords['Y'], image.coords['Y'])
-        assert_array_equal(frames_slice.coords['X'], image.coords['X'])
+        assert numpy.array_equal(
+            frames_slice.coords['Z'], image.coords['Z'][2:5]
+        )
+        assert numpy.array_equal(frames_slice.coords['Y'], image.coords['Y'])
+        assert numpy.array_equal(frames_slice.coords['X'], image.coords['X'])
         expected_indices = [
             (0, 0),  # C_local=0 (C_global=0), Z_local=0 (Z_global=2)
             (0, 1),  # C_local=0 (C_global=0), Z_local=1 (Z_global=3)
@@ -2386,15 +2439,15 @@ def test_frames_selection_types():
         assert frames_seq._info.dims == ('Z',)
         # coords should be indexed by sequence: Z has indices [9, 5, 2, 0]
         assert len(frames_seq.coords['Z']) == 4
-        assert_array_equal(
+        assert numpy.array_equal(
             frames_seq.coords['Z'], image.coords['Z'][z_indices]
         )
-        assert_array_equal(frames_seq.coords['Y'], image.coords['Y'])
-        assert_array_equal(frames_seq.coords['X'], image.coords['X'])
+        assert numpy.array_equal(frames_seq.coords['Y'], image.coords['Y'])
+        assert numpy.array_equal(frames_seq.coords['X'], image.coords['X'])
         for i, (nd_idx, frame) in enumerate(frames_seq.items()):
             assert nd_idx == (i,)  # local index 0, 1, 2, 3
             # Global Z index from sequence
-            assert_array_equal(frame, data[0, z_indices[i]])
+            assert numpy.array_equal(frame, data[0, z_indices[i]])
 
         # None selection (iterate all)
         assert len(image.frames(C=None)) == len(image.frames)
@@ -2409,11 +2462,11 @@ def test_frames_selection_types():
         assert frames_mixed._info.dims == ('Z',)
         # coords should be indexed by sequence: Z has indices [2, 5, 7]
         assert len(frames_mixed.coords['Z']) == 3
-        assert_array_equal(
+        assert numpy.array_equal(
             frames_mixed.coords['Z'], image.coords['Z'][[2, 5, 7]]
         )
-        assert_array_equal(frames_mixed.coords['Y'], image.coords['Y'])
-        assert_array_equal(frames_mixed.coords['X'], image.coords['X'])
+        assert numpy.array_equal(frames_mixed.coords['Y'], image.coords['Y'])
+        assert numpy.array_equal(frames_mixed.coords['X'], image.coords['X'])
         expected_mixed = [
             (0,),  # Z_local=0 (Z_global=2)
             (1,),  # Z_local=1 (Z_global=5)
@@ -2433,12 +2486,12 @@ def test_frames_get_method():
         # valid linear index returns frame
         frame = frames.get(0)
         assert frame is not None
-        assert_array_equal(frame, data[0, 0])
+        assert numpy.array_equal(frame, data[0, 0])
 
         # valid ND tuple index returns frame
         frame = frames.get((1, 5))
         assert frame is not None
-        assert_array_equal(frame, data[1, 5])
+        assert numpy.array_equal(frame, data[1, 5])
 
         # out of bounds linear index returns default
         result = frames.get(999)
@@ -2470,7 +2523,7 @@ def test_frames_get_method():
         frames_sub = image.frames(C=1)
         frame = frames_sub.get(0)
         assert frame is not None
-        assert_array_equal(frame, data[1, 0])
+        assert numpy.array_equal(frame, data[1, 0])
 
         result = frames_sub.get(100)
         assert result is None
@@ -2913,7 +2966,7 @@ def test_rgb(memmap):
         # C=2, S=3 -> 6 channels total; count mismatch so no coords for C or S
         assert 'C' not in image.coords
         assert 'S' not in image.coords
-        assert_array_equal(
+        assert numpy.array_equal(
             image.timestamps,
             numpy.array(
                 ['2012-10-12T00:18:10.777', '2012-10-12T00:18:13.798'],
@@ -2921,7 +2974,7 @@ def test_rgb(memmap):
             ),
         )
         data = image.asarray()
-        assert_array_equal(
+        assert numpy.array_equal(
             data.sum(dtype=numpy.uint64, axis=(0, 1, 2)),
             [12387812, 9225469, 82284132],
         )
@@ -2933,7 +2986,7 @@ def test_rgb(memmap):
 
         image = lif.images[1]
         assert image.sizes == {'Y': 1536, 'X': 2048, 'S': 3}
-        assert_array_equal(image.coords['S'], ['Red', 'Green', 'Blue'])
+        assert numpy.array_equal(image.coords['S'], ['Red', 'Green', 'Blue'])
         data = image.asarray()
         assert data.sum(dtype=numpy.uint64) == 86724120
 
@@ -2985,7 +3038,7 @@ def test_channel_names_multiband():
         assert image.sizes == {'C': 2, 'Y': 512, 'X': 512}
         # names come from MultiBand in main ATLConfocalSettingDefinition,
         # with 'Leica/' prefix stripped
-        assert_array_equal(image.coords['C'], ['EGFP', 'dTomato'])
+        assert numpy.array_equal(image.coords['C'], ['EGFP', 'dTomato'])
 
 
 def test_channel_names_sequential():
@@ -2997,7 +3050,9 @@ def test_channel_names_sequential():
         assert image.sizes == {'Z': 87, 'C': 3, 'Y': 256, 'X': 256}
         # names come from per-step MultiBand in LDM_Block_Sequential,
         # with 'Leica/' prefix stripped
-        assert_array_equal(image.coords['C'], ['ECFP', 'EYFP', 'mCherry'])
+        assert numpy.array_equal(
+            image.coords['C'], ['ECFP', 'EYFP', 'mCherry']
+        )
 
 
 @pytest.mark.parametrize('memmap', [False, True])
@@ -3113,7 +3168,7 @@ def test_phasor_from_lif():
     mean1, _real1, _imag1, attrs = phasor_from_lif(
         filename, image='FLIM Compressed'
     )
-    assert_array_equal(mean1, mean)
+    assert numpy.array_equal(mean1, mean)
 
     # TODO: file does not contain FLIM raw metadata
     # filename = private_file('....lif')
@@ -3239,7 +3294,11 @@ def test_glob(filename):
                 with pytest.raises(NotImplementedError):
                     image.asxarray()
             else:
-                image.asxarray()
+                try:
+                    image.asxarray()
+                except Exception:
+                    if 'defective' not in filename:
+                        raise
             _ = image.timestamps
             for ax in 'QA?':
                 if ax in image.dims:
