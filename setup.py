@@ -20,10 +20,10 @@ LIMITED_API = os.environ.get('CG_LIMITED_API', '1').lower() in ('1', 'true')
 if LIMITED_API and not sysconfig.get_config_var('Py_GIL_DISABLED'):
     py_limited_api = True
     define_macros = [
-        ('Py_LIMITED_API', 0x030B0000),
+        ('Py_LIMITED_API', 0x030C0000),
         ('CYTHON_LIMITED_API', '1'),
     ]
-    options = {'bdist_wheel': {'py_limited_api': 'cp311'}}
+    options = {'bdist_wheel': {'py_limited_api': 'cp312'}}
 else:
     py_limited_api = False
     define_macros = []
