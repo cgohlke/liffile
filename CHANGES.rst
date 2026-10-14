@@ -1,6 +1,12 @@
 Revisions
 =========
 
+2026.10.14
+
+- Fix child files not closed when LifFile is opened from binary stream.
+- Fix zero-length frame selections squeezed like singleton dimensions.
+- Fix missing index validation for frames in XLIF referencing OME/AIVIA TIFF.
+
 2026.10.8
 
 - Support XLLF (folder view) files.
