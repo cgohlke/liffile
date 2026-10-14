@@ -40,7 +40,7 @@ experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.8
+:Version: 2026.10.14
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -63,9 +63,9 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0rc 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.5.3
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.8.16
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
   (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.9.20
   (required for reading multi-page TIFF)
@@ -74,6 +74,12 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.10.14
+
+- Fix child files not closed when LifFile is opened from binary stream.
+- Fix zero-length frame selections squeezed like singleton dimensions.
+- Fix missing index validation for frames in XLIF referencing OME/AIVIA TIFF.
 
 2026.10.8
 
@@ -137,8 +143,8 @@ Related formats include LOF (single-object variant), XLIF, XLEF, and XLCF
 extensions).
 
 This library is not feature-complete. Unsupported features currently include
-image mosaics and pyramids, bit increments, and non-image data such as
-raw FLIM/TCSPC histogram data.
+image mosaics and pyramids, bit increments, heterogeneous channel dtypes,
+and non-image data such asraw FLIM/TCSPC histogram data.
 
 The library has been tested with only a limited number of version 2 files.
 
@@ -211,7 +217,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.10.8'
+__version__ = '2026.10.14'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -1110,9 +1116,11 @@ class LifFile(BinaryFile):
 
     def close(self) -> None:
         """Close file handle and free resources."""
-        if self._close:
-            for child in self.children:
-                child.close()
+        # Children always own their file handles.
+        # Read children from self.__dict__ (not self.children),
+        # so closing does not open every child file just to close it.
+        for child in self.__dict__.get('children', ()):
+            child.close()
         for ref in self._open_files:
             with contextlib.suppress(Exception):
                 ref.close()
@@ -1664,8 +1672,7 @@ class LifImage(LifImageABC):
 
         if len(channels) > 1 and any(dtype != c.dtype for c in channels):
             msg = (
-                'heterogeneous channel data types not supported '
-                'by LifImage.asarray; use the frames interface instead. '
+                'heterogeneous channel data types not supported. '
                 'Please share the file at https://github.com/cgohlke/liffile'
             )
             raise ValueError(msg)
@@ -1952,8 +1959,7 @@ class LifImage(LifImageABC):
 
         Notes:
             For advanced use cases, use the :py:attr:`frames` interface,
-            which supports per-dimension selections, heterogeneous channel
-            data types, and discontiguous storage.
+            which supports per-dimension selections and discontiguous storage.
 
         """
         if self._shape_stored is None:
@@ -2299,7 +2305,7 @@ class LifImageFrames:
                 for d, s, r in zip(
                     iter_dims, iter_sizes, iter_ranges, strict=True
                 )
-                if s > 1
+                if s != 1
             ]
             if len(squeezed) < len(iter_dims):
                 # store full dimensions for unsqueezing in __getitem__
@@ -2358,6 +2364,18 @@ class LifImageFrames:
         if lof_ref is not None:
             return lof_ref.images[0].frames._read_frame(out=out, **indices)
 
+        # validate indices
+        for key, value in indices.items():
+            if key not in image.sizes:
+                msg = f'unknown dimension {key!r}'
+                raise KeyError(msg)
+            if not 0 <= value < image.sizes[key]:
+                msg = (
+                    f'index {value} out of bounds '
+                    f'for dimension {key!r} with size {image.sizes[key]}'
+                )
+                raise IndexError(msg)
+
         tif_ref = image._tif_reference
         if tif_ref is not None:
             # calculate global linear frame index
@@ -2374,18 +2392,6 @@ class LifImageFrames:
                 # float16 data are stored as uint16 in TIFF
                 data = data.view(numpy.float16)
             return data
-
-        # validate indices
-        for key, value in indices.items():
-            if key not in image.sizes:
-                msg = f'unknown dimension {key!r}'
-                raise KeyError(msg)
-            if not 0 <= value < image.sizes[key]:
-                msg = (
-                    f'index {value} out of bounds '
-                    f'for dimension {key!r} with size {image.sizes[key]}'
-                )
-                raise IndexError(msg)
 
         # calculate byte offset from dimension indices
         offset = 0
