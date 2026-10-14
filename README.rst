@@ -13,7 +13,7 @@ experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.8
+:Version: 2026.10.14
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -36,9 +36,9 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0rc 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.5.3
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.8.16
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
   (required for decoding TIFF, JPEG, PNG, and BMP)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.9.20
   (required for reading multi-page TIFF)
@@ -47,6 +47,12 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.10.14
+
+- Fix child files not closed when LifFile is opened from binary stream.
+- Fix zero-length frame selections squeezed like singleton dimensions.
+- Fix missing index validation for frames in XLIF referencing OME/AIVIA TIFF.
 
 2026.10.8
 
@@ -110,8 +116,8 @@ Related formats include LOF (single-object variant), XLIF, XLEF, and XLCF
 extensions).
 
 This library is not feature-complete. Unsupported features currently include
-image mosaics and pyramids, bit increments, and non-image data such as
-raw FLIM/TCSPC histogram data.
+image mosaics and pyramids, bit increments, heterogeneous channel dtypes,
+and non-image data such asraw FLIM/TCSPC histogram data.
 
 The library has been tested with only a limited number of version 2 files.
 
