@@ -45,7 +45,15 @@ def lms_decode(const uint8_t[::1] data):
 
     Method for compression of time tagged data from time correlated
     single photon counting.
+    https://patents.google.com/patent/US12278654B2/en
     https://patents.google.com/patent/US20230344447A1/en
 
+    The patent describes grouping and sorting time-tagged records by photon
+    arrival time, then compressing differences between adjacent records.
+    Decoding decompresses the stream, restores any reduced bit depth, and
+    cumulatively adds differences within each group. The exact LMSCOMPRESSED
+    block format and its correspondence to this method remain unverified.
+
+
     """
-    raise NotImplementedError('compression scheme is patent pending')
+    raise NotImplementedError('compression scheme is patented')
