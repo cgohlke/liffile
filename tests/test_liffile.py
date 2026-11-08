@@ -29,9 +29,11 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.10.14
+:Version: 2026.11.8
 
 """
+
+from __future__ import annotations
 
 import contextlib
 import datetime
@@ -42,18 +44,24 @@ import mmap
 import os
 import pathlib
 import re
+import shutil
 import sys
 import sysconfig
-import tempfile
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree
+from xml.sax.saxutils import quoteattr
 
 import numpy
 import pytest
 import xarray
+from numpy import array_equal  # faster than numpy.testing.assert_array_equal
 from numpy.testing import assert_allclose
 
-# NOTE: ``assert numpy.array_equal`` much faster than ``assert_array_equal``
-# from numpy.testing import assert_array_equal
+if TYPE_CHECKING:
+    from typing import Any, Literal
+
+    from numpy.typing import ArrayLike
+
 
 try:
     import fsspec
@@ -77,14 +85,14 @@ from liffile import (
     imread,
     xml2dict,
 )
-from liffile.liffile import BinaryFile, case_sensitive_path
+from liffile.liffile import case_sensitive_path
 
 HERE = pathlib.Path(os.path.dirname(__file__))
 DATA = HERE / 'data'
 
 
 @pytest.fixture
-def scanmodes_file():
+def scanmodes_file() -> pathlib.Path:
     """Fixture providing path to ScanModesExamples.lif file."""
     filename = DATA / 'ScanModesExamples.lif'
     if not os.path.exists(filename):
@@ -868,8 +876,9 @@ SCANMODES = [
 ]
 
 
-def _assert_frames(image: LifImage, expected: numpy.ndarray) -> None:
+def _assert_frames(image: LifImageABC, expected: ArrayLike) -> None:
     """Assert frame access methods are consistent with asarray data."""
+    assert isinstance(image, LifImage)
     frames = image.frames
     assert isinstance(frames, LifImageFrames)
     repr(frames)
@@ -912,415 +921,44 @@ def _assert_frames(image: LifImage, expected: numpy.ndarray) -> None:
     assert len(fixed_frames) == expected_fixed
 
     # test selection with slice
-    if image.sizes[non_frame_dims[0]] > 2:
-        dim = non_frame_dims[0]
-        sliced_frames = frames(**{dim: slice(0, 2)})
-        expected_sliced = expected_count // image.sizes[dim] * 2
+    if image.sizes[first_dim] >= 2:
+        sliced_frames = frames(**{first_dim: slice(0, 2)})
+        expected_sliced = expected_count // image.sizes[first_dim] * 2
         assert len(sliced_frames) == expected_sliced
 
     # test selection with sequence
-    if image.sizes[non_frame_dims[0]] > 1:
-        dim = non_frame_dims[0]
-        seq_frames = frames(**{dim: [0]})
-        expected_seq = expected_count // image.sizes[dim]
-        assert len(seq_frames) == expected_seq
+    seq_frames = frames(**{first_dim: [0]})
+    assert len(seq_frames) == expected_fixed
 
     # first frame should match
-    assert numpy.array_equal(image.frame(), frames[0])
+    assert array_equal(image.frame(), frames[0])
 
     for frame in frames.values():
-        assert numpy.array_equal(frame, frames[0])
+        assert array_equal(frame, frames[0])
         break
 
     # frames.asarray should match image.asarray()
     out = numpy.empty(frames.shape, frames.dtype)
     xout = frames.asxarray(out=out)
-    assert numpy.array_equal(out, expected)
+    assert array_equal(out, expected)
     assert isinstance(xout, xarray.DataArray)
 
 
 @pytest.mark.skipif(__doc__ is None, reason='__doc__ is None')
-def test_version():
+def test_version() -> None:
     """Assert liffile versions match docstrings."""
     ver = ':Version: ' + __version__
     assert ver in __doc__
     assert ver in liffile.__doc__
 
 
-class TestBinaryFile:
-    """Test BinaryFile with different file-like inputs."""
-
-    def setup_method(self):
-        self.filename = os.path.normpath(DATA / 'binary.bin')
-        if not os.path.exists(self.filename):
-            pytest.skip(f'{self.filename!r} not found')
-
-    def validate(
-        self,
-        fh: BinaryFile,
-        filepath: str | None = None,
-        filename: str | None = None,
-        dirname: str | None = None,
-        name: str | None = None,
-        *,
-        closed: bool = True,
-    ) -> None:
-        """Assert BinaryFile attributes."""
-        if filepath is None:
-            filepath = self.filename
-        if filename is None:
-            filename = os.path.basename(self.filename)
-        if dirname is None:
-            dirname = os.path.dirname(self.filename)
-        if name is None:
-            name = fh.filename
-
-        attrs = fh.attrs
-        assert attrs['name'] == name
-        assert attrs['filepath'] == filepath
-
-        assert fh.filepath == filepath
-        assert fh.filename == filename
-        assert fh.dirname == dirname
-        assert fh.name == name
-        assert fh.closed is False
-        assert fh.filesize == 256
-        assert len(fh.filehandle.read()) == 256
-        fh.filehandle.seek(10)
-        assert fh.filehandle.tell() == 10
-        assert fh.filehandle.read(1) == b'\n'
-        fh.close()
-        # underlying filehandle may still be be open if
-        # BinaryFile was given an open filehandle
-        assert fh._fh.closed is closed
-        # BinaryFile always reports itself as closed after close() is called
-        assert fh.closed
-
-    def test_str(self):
-        """Test BinaryFile with str path."""
-        file = self.filename
-        with BinaryFile(file) as fh:
-            self.validate(fh, closed=True)
-
-    def test_pathlib(self):
-        """Test BinaryFile with pathlib.Path."""
-        file = pathlib.Path(self.filename)
-        with BinaryFile(file) as fh:
-            self.validate(fh, closed=True)
-
-    def test_open_file(self):
-        """Test BinaryFile with open binary file."""
-        with open(self.filename, 'rb') as fh, BinaryFile(fh) as bf:
-            self.validate(bf, closed=False)
-
-    def test_bytesio(self):
-        """Test BinaryFile with BytesIO."""
-        with open(self.filename, 'rb') as fh:
-            file = io.BytesIO(fh.read())
-        with BinaryFile(file) as fh:
-            self.validate(
-                fh,
-                filepath='',
-                filename='',
-                dirname='',
-                name='BytesIO',
-                closed=False,
-            )
-
-    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_openfile(self):
-        """Test BinaryFile with fsspec OpenFile."""
-        file = fsspec.open(self.filename)
-        with BinaryFile(file) as fh:
-            self.validate(fh, closed=True)
-
-    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_localfileopener(self):
-        """Test BinaryFile with fsspec LocalFileOpener."""
-        with fsspec.open(self.filename) as file, BinaryFile(file) as fh:
-            self.validate(fh, closed=False)
-
-    def test_text_file_fails(self):
-        """Test BinaryFile with open text file fails."""
-        with open(self.filename) as fh:  # noqa: SIM117
-            with pytest.raises(TypeError):
-                BinaryFile(fh)
-
-    def test_file_extension_fails(self):
-        """Test BinaryFile with wrong file extension fails."""
-        ext = BinaryFile._ext
-        BinaryFile._ext = {'.lif'}
-        try:
-            with pytest.raises(ValueError):
-                BinaryFile(self.filename)
-        finally:
-            BinaryFile._ext = ext
-
-    def test_file_not_seekable(self):
-        """Test BinaryFile with non-seekable file fails."""
-
-        class File:
-            # mock file object without tell methods
-            def seek(self):
-                pass
-
-        with pytest.raises(ValueError):
-            BinaryFile(File())
-
-    def test_openfile_not_seekable(self):
-        """Test BinaryFile with non-seekable file fails."""
-
-        class File:
-            # mock fsspec OpenFile without seek/tell methods
-            @staticmethod
-            def open(*args, **kwargs):
-                del args, kwargs
-                return File()
-
-        with pytest.raises(ValueError):
-            BinaryFile(File())
-
-    def test_invalid_object(self):
-        """Test BinaryFile with invalid file object fails."""
-
-        class File:
-            # mock non-file object
-            pass
-
-        with pytest.raises(TypeError):
-            BinaryFile(File())
-
-    def test_invalid_mode(self):
-        """Test BinaryFile with invalid mode fails."""
-        with pytest.raises(ValueError):
-            BinaryFile(self.filename, mode='ab')
-
-    def test_memmap_disabled(self):
-        """Test memmap=False (default) does not memory-map file."""
-        with BinaryFile(self.filename) as fh:
-            assert fh._mm is None
-        with BinaryFile(self.filename, memmap=False) as fh:
-            assert fh._mm is None
-
-    def test_memmap_bytesio_ignored(self):
-        """Test memmap=True is silently ignored for BytesIO."""
-        with open(self.filename, 'rb') as f:
-            data = f.read()
-        with BinaryFile(io.BytesIO(data), memmap=True) as fh:
-            assert fh._mm is None
-            assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
-
-    def test_memmap_mmap_object(self):
-        """Test BinaryFile accepts an existing mmap.mmap as file handle."""
-        import mmap as mmap_module
-
-        with open(self.filename, 'rb') as f:
-            mm = mmap_module.mmap(
-                f.fileno(), 0, access=mmap_module.ACCESS_READ
-            )
-        arr = None
-        try:
-            with BinaryFile(mm, memmap=True) as fh:
-                assert fh._mm is mm
-                assert fh._mv is not None
-                assert fh.memmapped
-                assert fh.filesize == 256
-                assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
-                arr = fh._read_array(10, 3, numpy.uint8)
-                assert numpy.array_equal(arr, [10, 11, 12])
-        finally:
-            del arr  # release mmap-backed array before closing mmap
-            mm.close()
-
-    @pytest.mark.parametrize('memmap', [False, True])
-    def test_read_at(self, memmap):
-        """Test _read_at returns bytes or memoryview at offset."""
-        with BinaryFile(self.filename, memmap=memmap) as fh:
-            data = fh._read_at(0, 4)
-            assert isinstance(data, memoryview if memmap else bytes)
-            assert bytes(data) == b'\x00\x01\x02\x03'
-            data = fh._read_at(10, 3)
-            assert bytes(data) == b'\x0a\x0b\x0c'
-
-    @pytest.mark.parametrize('memmap', [False, True])
-    def test_read_into(self, memmap):
-        """Test _read_into reads bytes at offset into existing uint8 buffer."""
-        with BinaryFile(self.filename, memmap=memmap) as fh:
-            buf = numpy.empty(4, numpy.uint8)
-            n = fh._read_into(0, buf)
-            assert n == 4
-            assert numpy.array_equal(buf, [0, 1, 2, 3])
-
-            buf = numpy.empty(3, numpy.uint8)
-            n = fh._read_into(10, buf)
-            assert n == 3
-            assert numpy.array_equal(buf, [10, 11, 12])
-
-            # read past end of file returns only available bytes
-            buf = numpy.empty(8, numpy.uint8)
-            n = fh._read_into(252, buf)
-            assert n == 4
-            assert numpy.array_equal(buf[:4], [252, 253, 254, 255])
-
-    @pytest.mark.parametrize('memmap', [False, True])
-    def test_read_array(self, memmap):
-        """Test _read_array returns array at offset; dtype, count=-1, copy."""
-        dtype = numpy.dtype('uint8')
-        with BinaryFile(self.filename, memmap=memmap) as fh:
-            arr = fh._read_array(0, 4, dtype)
-            assert arr.dtype == dtype
-            assert numpy.array_equal(arr, [0, 1, 2, 3])
-            arr = fh._read_array(10, 3, dtype)
-            assert numpy.array_equal(arr, [10, 11, 12])
-            if memmap:
-                assert not arr.flags.writeable
-                arr_copy = fh._read_array(0, 4, dtype, copy=True)
-                assert arr_copy.flags.writeable
-                arr_copy[0] = 99  # must not raise
-            else:
-                # multi-byte dtype: binary.bin bytes as uint16 LE pairs
-                arr16 = fh._read_array(0, 4, numpy.dtype('<u2'))
-                assert numpy.array_equal(
-                    arr16, [0x0100, 0x0302, 0x0504, 0x0706]
-                )
-            # count=-1 reads to end of file
-            arr_end = fh._read_array(252, -1, dtype)
-            assert numpy.array_equal(arr_end, [252, 253, 254, 255])
-
-    def test_read_array_writable_memmap(self, tmp_path):
-        """Test  writable=False makes mmap RO; writable=True keeps it RW."""
-        tmpfile = tmp_path / 'test.bin'
-        with open(self.filename, 'rb') as src:
-            tmpfile.write_bytes(src.read())
-        dtype = numpy.dtype('uint8')
-        with BinaryFile(tmpfile, mode='r+', memmap=True) as fh:
-            arr_ro = fh._read_array(0, 4, dtype)
-            assert not arr_ro.flags.writeable
-            arr_rw = fh._read_array(0, 4, dtype, writable=True)
-            assert arr_rw.flags.writeable
-
-    def test_read_array_truncate(self, caplog):
-        """Test truncate=False raises; True returns partial; None logs."""
-        import logging
-
-        with (
-            BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
-            pytest.raises(ValueError, match='expected 10 items, got 5'),
-        ):
-            fh._read_array(0, 10, numpy.uint8, truncate=False)
-        with BinaryFile(io.BytesIO(bytes(range(5)))) as fh:
-            arr = fh._read_array(0, 10, numpy.uint8, truncate=True)
-            assert len(arr) == 5
-            assert numpy.array_equal(arr, [0, 1, 2, 3, 4])
-        logger = BinaryFile.__module__.split('.')[0]
-        with (
-            BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
-            caplog.at_level(logging.ERROR, logger=logger),
-        ):
-            arr = fh._read_array(0, 10, numpy.uint8, truncate=None)
-        assert len(arr) == 5
-        assert 'expected 10 items, got 5' in caplog.text
-
-    def test_read_array_mmap_alignment(self, tmp_path):
-        """Test mmap path truncates partial element to full boundary."""
-        # 7 bytes; requesting 4 uint16 (8 bytes); 3 complete elements fit
-        tmpfile = tmp_path / 'align.bin'
-        tmpfile.write_bytes(b'\x01\x00\x02\x00\x03\x00\xff')
-        dtype = numpy.dtype('<u2')
-        with BinaryFile(tmpfile, memmap=True) as fh:
-            arr = fh._read_array(0, 4, dtype, truncate=True)
-            assert len(arr) == 3
-            assert numpy.array_equal(arr, [1, 2, 3])
-            # truncate=False must raise even on mmap path
-            with pytest.raises(ValueError, match='expected 4 items, got 3'):
-                fh._read_array(0, 4, dtype, truncate=False)
-
-    def test_read_array_invalid_offset(self):
-        """Test _read_array raises ValueError for negative offset."""
-        with BinaryFile(io.BytesIO(bytes(range(8)))) as fh:  # noqa: SIM117
-            with pytest.raises(ValueError, match='offset'):
-                fh._read_array(-1, 4, numpy.uint8)
-
-    def test_read_array_invalid_count(self):
-        """Test _read_array raises ValueError for count < -1."""
-        with BinaryFile(io.BytesIO(bytes(range(8)))) as fh:  # noqa: SIM117
-            with pytest.raises(ValueError, match='count'):
-                fh._read_array(0, -2, numpy.uint8)
-
-    def test_write_at(self):
-        """Test _write_at writes bytes to file at given offset."""
-        with open(self.filename, 'rb') as fh:
-            data = fh.read()
-        file = io.BytesIO(data)
-        with BinaryFile(file, mode='r+') as fh:
-            fh._write_at(5, b'\xaa\xbb\xcc')
-            assert bytes(fh._read_at(4, 5)) == b'\x04\xaa\xbb\xcc\x08'
-        # verify persistence after close
-        assert file.getvalue()[5:8] == b'\xaa\xbb\xcc'
-
-    def test_write_at_memmap(self, tmp_path):
-        """Test _write_at writes via mmap; mode='r+' creates writable mmap."""
-        tmpfile = tmp_path / 'test.bin'
-        tmpfile.write_bytes(pathlib.Path(self.filename).read_bytes())
-        with BinaryFile(tmpfile, mode='r+', memmap=True) as fh:
-            assert fh._mm is not None
-            assert fh.writable
-            assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
-            fh._write_at(5, b'\xaa\xbb\xcc')
-        with BinaryFile(tmpfile) as fh:
-            assert bytes(fh._read_at(5, 3)) == b'\xaa\xbb\xcc'
-
-    def test_memmapped(self):
-        """Test memmapped property reflects memory-map state."""
-        with BinaryFile(self.filename) as fh:
-            assert not fh.memmapped
-        with BinaryFile(self.filename, memmap=True) as fh:
-            assert fh.memmapped
-
-    def test_writable(self, tmp_path):
-        """Test writable property reflects file open mode."""
-        tmpfile = tmp_path / 'test.bin'
-        tmpfile.write_bytes(b'\x00' * 4)
-        with BinaryFile(tmpfile) as fh:
-            assert not fh.writable
-        with BinaryFile(tmpfile, mode='r+') as fh:
-            assert fh.writable
-
-    def test_name_setter(self):
-        """Test name setter updates display name and attrs."""
-        with BinaryFile(self.filename) as fh:
-            fh.name = 'custom'
-            assert fh.name == 'custom'
-            assert fh.attrs['name'] == 'custom'
-
-    def test_set_lock(self):
-        """Test set_lock enables and disables RLock; no-op when mmap active."""
-        import threading
-
-        with BinaryFile(self.filename) as fh:
-            assert isinstance(fh.lock, contextlib.nullcontext)
-            fh.set_lock(True)
-            assert isinstance(fh.lock, type(threading.RLock()))
-            fh.set_lock(False)
-            assert isinstance(fh.lock, contextlib.nullcontext)
-        with BinaryFile(self.filename, memmap=True) as fh:
-            lock_before = fh.lock
-            fh.set_lock(True)
-            assert fh.lock is lock_before
-
-    def test_repr(self):
-        """Test __repr__ includes class name and file name."""
-        with BinaryFile(self.filename) as fh:
-            r = repr(fh)
-            assert r.startswith('<BinaryFile ')
-            assert 'binary.bin' in r
-
-
 class TestLifFile:
     """Test LifFile with different file-like inputs."""
 
+    filename: str
+
     @pytest.fixture(autouse=True)
-    def setup(self, scanmodes_file):
+    def setup(self, scanmodes_file: pathlib.Path) -> None:
         """Set up test with scanmodes file."""
         self.filename = os.path.normpath(scanmodes_file)
 
@@ -1345,54 +983,97 @@ class TestLifFile:
         im = series[5]
         str(im)
         assert series[im.path] is im
+        data = im.asarray()
+        assert data.sum(dtype=numpy.uint64) == 27141756
+        assert im.memory_block.read() == data.tobytes()
 
-    def test_str(self):
+    def test_str(self) -> None:
         """Test LifFile with str path."""
         file = self.filename
         with LifFile(file) as lif:
             self.validate(lif)
 
-    def test_pathlib(self):
+    def test_pathlib(self) -> None:
         """Test LifFile with pathlib.Path."""
         file = pathlib.Path(self.filename)
         with LifFile(file) as lif:
             self.validate(lif)
 
-    def test_open_file(self):
+    def test_open_file(self) -> None:
         """Test LifFile with open binary file."""
         with open(self.filename, 'rb') as fh, LifFile(fh) as lif:
             self.validate(lif)
 
-    def test_bytesio(self):
+    def test_bytesio(self) -> None:
         """Test LifFile with BytesIO."""
         with open(self.filename, 'rb') as fh:
             file = io.BytesIO(fh.read())
         with LifFile(file) as lif:
             self.validate(lif)
 
-    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_openfile(self):
-        """Test LifFile with fsspec OpenFile."""
-        file = fsspec.open(self.filename)
-        with LifFile(file) as lif:
+    def test_mmap(self) -> None:
+        """Test LifFile with mmap.mmap."""
+        with (
+            open(self.filename, 'rb') as fh,
+            mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
+            LifFile(mm) as lif,  # type: ignore[arg-type]
+        ):
             self.validate(lif)
-        file.close()
+
+    def test_memmap(self) -> None:
+        """Test LifFile with memmap=True reads same data as without."""
+        with LifFile(self.filename) as lif:
+            assert lif._mm is None
+            ref = lif.images[5].asarray()
+        with LifFile(self.filename, memmap=True) as lif:
+            assert lif._mm is not None
+            data = lif.images[5].asarray()
+        assert array_equal(data, ref)
+
+    def test_memmap_bytesio_ignored(self) -> None:
+        """Test LifFile memmap=True is silently ignored for BytesIO."""
+        with open(self.filename, 'rb') as fh:
+            bio = io.BytesIO(fh.read())
+        with LifFile(bio, memmap=True) as lif:
+            assert lif._mm is None
+            self.validate(lif)
+
+    def test_memmap_writable(self, tmp_path: pathlib.Path) -> None:
+        """Test LifFile with mode='r+' and memmap=True reads correct data."""
+        tmpfile = tmp_path / 'ScanModesExamples.lif'
+        shutil.copy2(self.filename, tmpfile)
+        with LifFile(tmpfile, mode='r+', memmap=True) as lif:
+            assert lif._mm is not None
+            self.validate(lif)
 
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
-    def test_fsspec_localfileopener(self):
+    def test_fsspec_openfile(self) -> None:
+        """Test LifFile with fsspec OpenFile."""
+        file = fsspec.open(self.filename)
+        try:
+            with LifFile(file) as lif:
+                self.validate(lif)
+        finally:
+            file.close()
+
+    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
+    def test_fsspec_localfileopener(self) -> None:
         """Test LifFile with fsspec LocalFileOpener."""
         with fsspec.open(self.filename) as file, LifFile(file) as lif:
             self.validate(lif)
 
 
-def test_not_lif():
+def test_not_lif() -> None:
     """Test open non-LIF file raises exceptions."""
+    for filename in ('empty.bin', 'ScanModesExamples.lif.xml'):
+        if not (DATA / filename).exists():
+            pytest.skip(f'{filename!r} not found')
     with pytest.raises(LifFileError):
         imread(DATA / 'empty.bin')
     with pytest.raises(LifFileError):
         imread(DATA / 'ScanModesExamples.lif.xml')
     with pytest.raises(TypeError):
-        imread(TypeError)
+        imread(TypeError)  # type: ignore[call-overload]
 
 
 @pytest.mark.parametrize(
@@ -1443,16 +1124,22 @@ def test_not_lif():
     ],
 )
 def test_imread(
-    asxarray, selection, squeeze, expected_sizes, expected_sum, scanmodes_file
-):
+    *,
+    asxarray: bool,
+    selection: dict[str, Any] | None,
+    squeeze: bool,
+    expected_sizes: dict[str, Any],
+    expected_sum: int,
+    scanmodes_file: pathlib.Path,
+) -> None:
     """Test imread function with various parameters."""
-    data = imread(
+    data: Any = imread(
         scanmodes_file,
         image=5,
         selection=selection,
         squeeze=squeeze,
         out=None,
-        asxarray=asxarray,
+        asxarray=asxarray,  # type: ignore[call-overload]
     )
     if asxarray:
         assert isinstance(data, xarray.DataArray)
@@ -1464,25 +1151,34 @@ def test_imread(
     assert data.sum(dtype=numpy.uint32) == expected_sum
 
 
-@pytest.mark.parametrize('filetype', [str, io.BytesIO, mmap])
-def test_lif(filetype, scanmodes_file):
+@pytest.mark.parametrize('memmap', [False, True])
+def test_lif(
+    memmap: Literal[False, True], scanmodes_file: pathlib.Path
+) -> None:
     """Test LIF file."""
-    if filetype is io.BytesIO:
-        scanmodes_file = open(scanmodes_file, 'rb')  # noqa: SIM115
-    memmap = filetype is mmap
+    file = str(scanmodes_file)
 
-    with LifFile(
-        scanmodes_file, memmap=memmap, mode='r+b', squeeze=True
-    ) as lif:
+    with LifFile(file, memmap=memmap, mode='r', squeeze=True) as lif:
         str(lif)
         assert lif.parent is None
-        if filetype is str:
-            assert lif.filename == str(scanmodes_file.name)
-            assert lif.dirname == str(scanmodes_file.parent)
+        assert lif.filename == scanmodes_file.name
+        assert lif.dirname == str(scanmodes_file.parent)
+        assert lif.filepath == os.path.abspath(file)
+        assert lif.attrs['filepath'] == lif.filepath
         assert not lif.filehandle.closed
         assert lif.name == 'ScanModiBeispiele.lif'
         assert lif.version == 2
         assert lif.uuid == '9da018ae-5b2b-11e3-8f53-eccd6d2154b5'
+
+        # set_lock is a no-op when memmap is active
+        assert isinstance(lif.lock, contextlib.nullcontext)
+        lif.set_lock(True)
+        if memmap:
+            assert isinstance(lif.lock, contextlib.nullcontext)
+        else:
+            assert not isinstance(lif.lock, contextlib.nullcontext)
+        lif.set_lock(False)
+        assert isinstance(lif.lock, contextlib.nullcontext)
         assert lif.datetime == datetime.datetime(
             2013, 12, 2, 8, 27, 44, tzinfo=datetime.UTC
         )
@@ -1511,14 +1207,18 @@ def test_lif(filetype, scanmodes_file):
         assert len(images) == 9
         assert images[0].name == 'Lambda_496nm'
         assert images[0].parent_image is None
+        assert images[1].uuid is not None
         assert series.findall(images[1].uuid, attr='uuid')[0] is images[1]
 
         im = series.find('Lambda_496nm', flags=re.IGNORECASE)
+        assert isinstance(im, LifImage)
         assert im is images[0]
         assert series.find('ABC', default=im) is im
+        assert im.uuid is not None
         assert series.find(im.uuid, attr='uuid') is im
 
         im = series[5]
+        assert isinstance(im, LifImage)
         str(im)
         assert series[im.path] is im
         assert series[im.name + '$'] is im
@@ -1534,7 +1234,7 @@ def test_lif(filetype, scanmodes_file):
         assert im.shape == (7, 5, 2, 128, 128)
         assert im.dims == ('T', 'Z', 'C', 'Y', 'X')
         assert im.sizes == {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128}
-        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1'])
+        assert array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 10.657])
         assert_allclose(im.coords['Z'][[0, -1]], [4.999881e-06, -5.000359e-06])
         assert_allclose(im.coords['Y'][[0, -1]], [-3.418137e-05, 3.658182e-04])
@@ -1562,13 +1262,13 @@ def test_lif(filetype, scanmodes_file):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert numpy.array_equal(xdata.data, data)
+        assert array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
         assert xdata.shape == im.shape
         assert xdata.attrs == im.attrs
-        assert numpy.array_equal(xdata.coords['T'], im.coords['T'])
+        assert array_equal(xdata.coords['T'], im.coords['T'])
 
         memory_block = im.memory_block
         str(im.memory_block)
@@ -1581,19 +1281,14 @@ def test_lif(filetype, scanmodes_file):
 
         _assert_frames(im, xdata.data)
 
-        if filetype is str:
-            lif.close()
-            assert lif.filehandle.closed
+    assert lif.closed
 
-    if filetype is io.BytesIO:
-        scanmodes_file.close()
-    else:
-        with pytest.raises(ValueError):
-            lif = LifFile(scanmodes_file, memmap=memmap, mode='abc')
+    with pytest.raises(ValueError):
+        LifFile(file, memmap=memmap, mode='abc')  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_lof(memmap):
+def test_lof(memmap: Literal[False, True]) -> None:
     """Test LOF file."""
     filename = (
         DATA
@@ -1633,6 +1328,7 @@ def test_lof(memmap):
         assert images[0].name == 'XYCST'
 
         im = series[0]
+        assert isinstance(im, LifImage)
         str(im)
         assert series[im.path] is im
         assert series[im.name + '$'] is im
@@ -1648,7 +1344,7 @@ def test_lof(memmap):
         assert im.shape == (2, 4, 3, 1200, 1600)
         assert im.dims == ('T', 'M', 'C', 'Y', 'X')
         assert im.sizes == {'T': 2, 'M': 4, 'C': 3, 'Y': 1200, 'X': 1600}
-        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1', 'Ch2'])
+        assert array_equal(im.coords['C'], ['Ch0', 'Ch1', 'Ch2'])
         assert_allclose(im.coords['T'][[0, -1]], [0.0, 1.0])
         assert_allclose(im.coords['Y'][[0, -1]], [0.0, 0.00122755], atol=1e-4)
         assert_allclose(im.coords['X'][[0, -1]], [0.0, 0.00163707], atol=1e-4)
@@ -1679,13 +1375,13 @@ def test_lof(memmap):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert numpy.array_equal(xdata.data, data)
+        assert array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
         assert xdata.shape == im.shape
         assert xdata.attrs == im.attrs
-        assert numpy.array_equal(xdata.coords['T'], im.coords['T'])
+        assert array_equal(xdata.coords['T'], im.coords['T'])
 
         memory_block = im.memory_block
         str(im.memory_block)
@@ -1711,7 +1407,9 @@ def test_lof(memmap):
     ],
 )
 @pytest.mark.parametrize('memmap', [False, True])
-def test_xlif(name, block_type, memmap):
+def test_xlif(
+    name: str, block_type: LifMemoryBlockType, memmap: Literal[False, True]
+) -> None:
     """Test XLIF file."""
     filename = (
         DATA
@@ -1753,6 +1451,7 @@ def test_xlif(name, block_type, memmap):
         assert images[0].name == 'ImageXYZ10C2'
 
         im = series[0]
+        assert isinstance(im, LifImage)
         str(im)
         assert series[im.path] is im
         assert series[im.name + '$'] is im
@@ -1766,7 +1465,7 @@ def test_xlif(name, block_type, memmap):
         assert im.shape == (10, 2, 512, 512)
         assert im.dims == ('Z', 'C', 'Y', 'X')
         assert im.sizes == {'Z': 10, 'C': 2, 'Y': 512, 'X': 512}
-        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1'])
+        assert array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(
             im.coords['Z'][[0, -1]], [-2.345302e-05, 1.786591e-05], atol=1e-4
         )
@@ -1795,13 +1494,13 @@ def test_xlif(name, block_type, memmap):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert numpy.array_equal(xdata.data, data)
+        assert array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
         assert xdata.shape == im.shape
         assert xdata.attrs == im.attrs
-        assert numpy.array_equal(xdata.coords['Z'], im.coords['Z'])
+        assert array_equal(xdata.coords['Z'], im.coords['Z'])
 
         memory_block = im.memory_block
         str(im.memory_block)
@@ -1817,7 +1516,7 @@ def test_xlif(name, block_type, memmap):
 
 @pytest.mark.parametrize('name', ['LOF', 'TIF'])
 @pytest.mark.parametrize('memmap', [False, True])
-def test_xlif_lof(name, memmap):
+def test_xlif_lof(name: str, memmap: Literal[False, True]) -> None:
     """Test XLIF file referencing LOF."""
     filename = (
         DATA
@@ -1862,7 +1561,7 @@ def test_xlif_lof(name, memmap):
 
 @pytest.mark.parametrize('name', ['LOF', 'TIF'])
 @pytest.mark.parametrize('memmap', [False, True])
-def test_xlef(name, memmap):
+def test_xlef(name: str, memmap: Literal[False, True]) -> None:
     """Test XLEF file with XLIF and XLCF children."""
     if name == 'LOF':
         name = 'XLEF-LOF Snail/Schnecke.xlef'
@@ -1902,9 +1601,12 @@ def test_xlef(name, memmap):
         assert images[0].name == 'Depth Map Image'
 
         im = series[1]
+        assert isinstance(im, LifImage)
         str(im)
         assert series[im.path] is im
         assert series[im.name + '$'] is im
+        assert im.parent is not None
+        assert im.parent.parent is not None
         assert im.parent.parent.parent is xlef
         assert im.parent.parent.type == LifFileType.XLCF
         assert im.parent.parent.name == 'Series010_EDF001'
@@ -1941,10 +1643,10 @@ def test_xlef(name, memmap):
 
         xdata = im.asxarray()
         assert isinstance(xdata, xarray.DataArray)
-        assert numpy.array_equal(xdata.data, data)
+        assert array_equal(xdata.data, data)
 
 
-def test_xlef_tmczyx():
+def test_xlef_tmczyx() -> None:
     """Test XLEF file with TMCZYX dimensions."""
     filename = DATA / 'XYZCST/XYZCST.xlef'  # M dimension is S in LASX
 
@@ -2022,10 +1724,10 @@ def test_xlef_tmczyx():
 
         xdata = im.asxarray()
         assert isinstance(xdata, xarray.DataArray)
-        assert numpy.array_equal(xdata.data, data)
+        assert array_equal(xdata.data, data)
 
 
-def test_xllf():
+def test_xllf() -> None:
     """Test XLLF folder-view file with XLIF children."""
     filename = (
         DATA
@@ -2075,7 +1777,7 @@ def test_xllf():
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_lifext(memmap):
+def test_lifext(memmap: Literal[False, True]) -> None:
     """Test LIFEXT file."""
     filename = str(DATA / 'XLEFReaderForBioformats/dimension tests LIFs/XYZCS')
 
@@ -2104,7 +1806,7 @@ def test_lifext(memmap):
         assert isinstance(series, LifImageSeries)
         assert len(series) == 7
         with pytest.raises(IndexError):
-            lifext.images[8]
+            lifext.images[7]
 
         for image in series:
             str(image)
@@ -2121,6 +1823,7 @@ def test_lifext(memmap):
         assert im.child_images == (images[1],)
 
         im = series[1]
+        assert isinstance(im, LifImage)
         str(im)
         assert series[im.path] is im
         assert series[im.name + '$'] is im
@@ -2132,7 +1835,7 @@ def test_lifext(memmap):
         assert im.dtype == numpy.uint8
         assert im.itemsize == 1
         assert im.sizes == {'M': 4, 'C': 2, 'Z': 5, 'Y': 300, 'X': 400}
-        assert numpy.array_equal(im.coords['C'], ['Ch0', 'Ch1'])
+        assert array_equal(im.coords['C'], ['Ch0', 'Ch1'])
         assert_allclose(im.coords['Z'][[0, -1]], [0.0, 7.19784e-05])
         assert im.attrs['path'] != im.parent.name + '/' + im.path
         assert im.timestamps is None
@@ -2149,7 +1852,7 @@ def test_lifext(memmap):
 
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
-        assert numpy.array_equal(xdata.data, data)
+        assert array_equal(xdata.data, data)
         assert xdata.name == im.name
         assert xdata.dtype == im.dtype
         assert xdata.dims == im.dims
@@ -2167,7 +1870,7 @@ def test_lifext(memmap):
 
 
 @pytest.mark.parametrize('index', range(len(SCANMODES)))
-def test_scan_modes(index, scanmodes_file):
+def test_scan_modes(index: int, scanmodes_file: pathlib.Path) -> None:
     """Test scan modes."""
     path, sizes, dtype = SCANMODES[index]
     shape = tuple(sizes.values())
@@ -2200,7 +1903,7 @@ def test_scan_modes(index, scanmodes_file):
             _assert_frames(image, data.data)
 
 
-def test_frame_indices_errors(scanmodes_file):
+def test_frame_indices_errors(scanmodes_file: pathlib.Path) -> None:
     """Test frames selection raises appropriate errors."""
     with LifFile(scanmodes_file) as lif:
         # use XYZT which has T, Z, C dimensions outside frame
@@ -2234,7 +1937,11 @@ def test_frame_indices_errors(scanmodes_file):
         ('Mark_and_Find_XT/Position7007', ('T', 'X')),
     ],
 )
-def test_frame_dims_unusual(scanmodes_file, name, expected_frame_dims):
+def test_frame_dims_unusual(
+    scanmodes_file: pathlib.Path,
+    name: str,
+    expected_frame_dims: tuple[str, ...],
+) -> None:
     """Test frame_dims for unusual dimension orders (ZX, TX instead of YX)."""
     with LifFile(scanmodes_file, squeeze=True) as lif:
         image = lif.images[name]
@@ -2245,11 +1952,12 @@ def test_frame_dims_unusual(scanmodes_file, name, expected_frame_dims):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_frame_method(memmap):
+def test_frame_method(memmap: Literal[False, True]) -> None:
     """Test frame method returns correct single frames."""
     filename = DATA / 'image.sc_107410/Edu_examples.lif'
     with LifFile(filename, memmap=memmap) as lif:
         image = lif.images[0]
+        assert isinstance(image, LifImage)
         data = image.asarray()
 
         assert image.sizes == {'C': 4, 'Z': 10, 'Y': 1024, 'X': 1024}
@@ -2257,22 +1965,22 @@ def test_frame_method(memmap):
         # test default indices (all zeros)
         frame = image.frame()
         assert frame.shape == (1024, 1024)
-        assert numpy.array_equal(frame, data[0, 0])
+        assert array_equal(frame, data[0, 0])
 
         # test specified indices
         frame = image.frame(C=1, Z=3)
         assert frame.shape == (1024, 1024)
-        assert numpy.array_equal(frame, data[1, 3])
+        assert array_equal(frame, data[1, 3])
 
         # test partial indices (unspecified default to 0)
         frame = image.frame(Z=5)
-        assert numpy.array_equal(frame, data[0, 5])
+        assert array_equal(frame, data[0, 5])
 
         # test out parameter
         out = numpy.zeros((1024, 1024), dtype=image.dtype)
         result = image.frame(C=2, Z=7, out=out)
         assert result is out
-        assert numpy.array_equal(result, data[2, 7])
+        assert array_equal(result, data[2, 7])
 
         # test errors
         with pytest.raises(KeyError):
@@ -2282,7 +1990,7 @@ def test_frame_method(memmap):
             image.frame(C=100)
 
 
-def test_frames_iteration_order():
+def test_frames_iteration_order() -> None:
     """Test frames() iteration order follows keyword argument order."""
     filename = DATA / 'image.sc_107410/Edu_examples.lif'
     with LifFile(filename) as lif:
@@ -2347,7 +2055,7 @@ def test_frames_iteration_order():
         assert indices_c_only[4] == (1, 0)  # Z=1, C=0
 
 
-def test_frames_selection_types():
+def test_frames_selection_types() -> None:
     """Test frames() with different selection types."""
     filename = DATA / 'image.sc_107410/Edu_examples.lif'
     with LifFile(filename) as lif:
@@ -2370,7 +2078,7 @@ def test_frames_selection_types():
         assert len(image.coords['Z']) == 10
         assert len(image.coords['Y']) == 1024
         assert len(image.coords['X']) == 1024
-        assert numpy.array_equal(
+        assert array_equal(
             image.coords['C'],
             ['ALEXA 405', 'ALEXA 488', 'ALEXA 488', 'ALEXA 555'],
         )
@@ -2379,9 +2087,9 @@ def test_frames_selection_types():
         assert 'Y' in frames.coords
         assert 'X' in frames.coords
         assert 'Z' in frames.coords
-        assert numpy.array_equal(frames.coords['Z'], image.coords['Z'])
-        assert numpy.array_equal(frames.coords['Y'], image.coords['Y'])
-        assert numpy.array_equal(frames.coords['X'], image.coords['X'])
+        assert array_equal(frames.coords['Z'], image.coords['Z'])
+        assert array_equal(frames.coords['Y'], image.coords['Y'])
+        assert array_equal(frames.coords['X'], image.coords['X'])
 
         # int selection (fixed index)
         # C is fixed at 1, only Z iterates
@@ -2394,13 +2102,13 @@ def test_frames_selection_types():
         assert frames_c1._info.dims == ('Z',)
         assert frames_c1 is not frames  # selection returns new object
         # coords should be indexed: Z has all values, Y and X unchanged
-        assert numpy.array_equal(frames_c1.coords['Z'], image.coords['Z'])
-        assert numpy.array_equal(frames_c1.coords['Y'], image.coords['Y'])
-        assert numpy.array_equal(frames_c1.coords['X'], image.coords['X'])
+        assert array_equal(frames_c1.coords['Z'], image.coords['Z'])
+        assert array_equal(frames_c1.coords['Y'], image.coords['Y'])
+        assert array_equal(frames_c1.coords['X'], image.coords['X'])
         for i, (nd_idx, frame) in enumerate(frames_c1.items()):
             assert nd_idx == (i,)  # local index
             # Convert to global: C=1 (fixed), Z=i (iterates 0..9)
-            assert numpy.array_equal(frame, data[1, i])
+            assert array_equal(frame, data[1, i])
 
         # slice selection
         # Both C and Z specified with slices
@@ -2413,11 +2121,9 @@ def test_frames_selection_types():
         assert frames_slice._info.dims == ('C', 'Z')
         # coords should be sliced: Z has indices 2:5, Y and X unchanged
         assert len(frames_slice.coords['Z']) == 3
-        assert numpy.array_equal(
-            frames_slice.coords['Z'], image.coords['Z'][2:5]
-        )
-        assert numpy.array_equal(frames_slice.coords['Y'], image.coords['Y'])
-        assert numpy.array_equal(frames_slice.coords['X'], image.coords['X'])
+        assert array_equal(frames_slice.coords['Z'], image.coords['Z'][2:5])
+        assert array_equal(frames_slice.coords['Y'], image.coords['Y'])
+        assert array_equal(frames_slice.coords['X'], image.coords['X'])
         expected_indices = [
             (0, 0),  # C_local=0 (C_global=0), Z_local=0 (Z_global=2)
             (0, 1),  # C_local=0 (C_global=0), Z_local=1 (Z_global=3)
@@ -2439,15 +2145,15 @@ def test_frames_selection_types():
         assert frames_seq._info.dims == ('Z',)
         # coords should be indexed by sequence: Z has indices [9, 5, 2, 0]
         assert len(frames_seq.coords['Z']) == 4
-        assert numpy.array_equal(
+        assert array_equal(
             frames_seq.coords['Z'], image.coords['Z'][z_indices]
         )
-        assert numpy.array_equal(frames_seq.coords['Y'], image.coords['Y'])
-        assert numpy.array_equal(frames_seq.coords['X'], image.coords['X'])
+        assert array_equal(frames_seq.coords['Y'], image.coords['Y'])
+        assert array_equal(frames_seq.coords['X'], image.coords['X'])
         for i, (nd_idx, frame) in enumerate(frames_seq.items()):
             assert nd_idx == (i,)  # local index 0, 1, 2, 3
             # Global Z index from sequence
-            assert numpy.array_equal(frame, data[0, z_indices[i]])
+            assert array_equal(frame, data[0, z_indices[i]])
 
         # None selection (iterate all)
         assert len(image.frames(C=None)) == len(image.frames)
@@ -2462,11 +2168,11 @@ def test_frames_selection_types():
         assert frames_mixed._info.dims == ('Z',)
         # coords should be indexed by sequence: Z has indices [2, 5, 7]
         assert len(frames_mixed.coords['Z']) == 3
-        assert numpy.array_equal(
+        assert array_equal(
             frames_mixed.coords['Z'], image.coords['Z'][[2, 5, 7]]
         )
-        assert numpy.array_equal(frames_mixed.coords['Y'], image.coords['Y'])
-        assert numpy.array_equal(frames_mixed.coords['X'], image.coords['X'])
+        assert array_equal(frames_mixed.coords['Y'], image.coords['Y'])
+        assert array_equal(frames_mixed.coords['X'], image.coords['X'])
         expected_mixed = [
             (0,),  # Z_local=0 (Z_global=2)
             (1,),  # Z_local=1 (Z_global=5)
@@ -2475,7 +2181,7 @@ def test_frames_selection_types():
         assert list(frames_mixed.keys()) == expected_mixed
 
 
-def test_frames_get_method():
+def test_frames_get_method() -> None:
     """Test frames.get() method with default values."""
     filename = DATA / 'image.sc_107410/Edu_examples.lif'
     with LifFile(filename) as lif:
@@ -2486,12 +2192,12 @@ def test_frames_get_method():
         # valid linear index returns frame
         frame = frames.get(0)
         assert frame is not None
-        assert numpy.array_equal(frame, data[0, 0])
+        assert array_equal(frame, data[0, 0])
 
         # valid ND tuple index returns frame
         frame = frames.get((1, 5))
         assert frame is not None
-        assert numpy.array_equal(frame, data[1, 5])
+        assert array_equal(frame, data[1, 5])
 
         # out of bounds linear index returns default
         result = frames.get(999)
@@ -2511,25 +2217,20 @@ def test_frames_get_method():
         assert result is None
 
         # invalid type returns default
-        result = frames.get('invalid')
+        result = frames.get('invalid')  # type: ignore[arg-type]
         assert result is None
-
-        # custom default value
-        custom_default = numpy.array([42])
-        result = frames.get(999, default=custom_default)
-        assert result is custom_default
 
         # test with selection
         frames_sub = image.frames(C=1)
         frame = frames_sub.get(0)
         assert frame is not None
-        assert numpy.array_equal(frame, data[1, 0])
+        assert array_equal(frame, data[1, 0])
 
         result = frames_sub.get(100)
         assert result is None
 
 
-def test_frames_unravel_ravel():
+def test_frames_unravel_ravel() -> None:
     """Test unravel_index and ravel_multi_index methods."""
     filename = DATA / 'image.sc_107410/Edu_examples.lif'
     with LifFile(filename) as lif:
@@ -2672,7 +2373,7 @@ def test_frames_unravel_ravel():
 
 
 @pytest.mark.parametrize('squeeze', [True, False])
-def test_lif_single_tile(squeeze):
+def test_lif_single_tile(*, squeeze: bool) -> None:
     """Test LIF file with single tile."""
     # file has tile scan metadata but no M dimension
     filename = DATA / 'bioio-lif/single_tile_scan.lif'
@@ -2691,7 +2392,7 @@ def test_lif_single_tile(squeeze):
         assert len(lif.images.findall(path + '$')) == 1  # no duplicates
 
 
-def test_lif_duplicate_paths():
+def test_lif_duplicate_paths() -> None:
     """Test LIF file with images of same path."""
     # file was patched manually to rename image paths to be the same
     filename = DATA / 'bioio-lif/single_tile_scan_duplicates.lif'
@@ -2723,7 +2424,7 @@ def test_lif_duplicate_paths():
         '../case_sensitive/FLIM_testdata/FLIM_testdata.xlef',
     ],
 )
-def test_flim(name):
+def test_flim(name: str) -> None:
     """Test FLIM image formats."""
     filename = DATA / 'FLIM_testdata' / name
     with LifFile(filename) as lif:
@@ -2838,7 +2539,7 @@ def test_flim(name):
         'RS_FALCON_10Volumes.ome.tif/RS_FALCON_10Volumes.xlef',
     ],
 )
-def test_flim_nd(name):
+def test_flim_nd(name: str) -> None:
     """Test multi-dimensional FLIM image formats."""
     filename = DATA / name
     with LifFile(filename) as lif:
@@ -2868,7 +2569,6 @@ def test_flim_nd(name):
         flim = lif.images['Series006$']
         assert isinstance(flim, LifImageABC)
         assert isinstance(flim, LifFlimImage)
-        # if name.endswith('.lif'):
         assert flim.parent_image is base
         assert len(flim.child_images) == 10
         assert lif.uuid == '4441a913-c99c-11ee-b559-98597a5338f0'
@@ -2912,7 +2612,7 @@ def test_flim_nd(name):
         _assert_frames(lifetime, data.data)
 
 
-def test_flim_lof():
+def test_flim_lof() -> None:
     """Test LOF file with FLIM image."""
     filename = (
         DATA
@@ -2957,16 +2657,18 @@ def test_flim_lof():
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_rgb(memmap):
+def test_rgb(memmap: Literal[False, True]) -> None:
     """Test read 6 channel RGB."""
     filename = DATA / 'RGB/Experiment.lif'
     with LifFile(filename, memmap=memmap) as lif:
         image = lif.images[0]
+        assert isinstance(image, LifImage)
         assert image.sizes == {'C': 2, 'Y': 1536, 'X': 2048, 'S': 3}
         # C=2, S=3 -> 6 channels total; count mismatch so no coords for C or S
         assert 'C' not in image.coords
         assert 'S' not in image.coords
-        assert numpy.array_equal(
+        assert image.timestamps is not None
+        assert array_equal(
             image.timestamps,
             numpy.array(
                 ['2012-10-12T00:18:10.777', '2012-10-12T00:18:13.798'],
@@ -2974,7 +2676,7 @@ def test_rgb(memmap):
             ),
         )
         data = image.asarray()
-        assert numpy.array_equal(
+        assert array_equal(
             data.sum(dtype=numpy.uint64, axis=(0, 1, 2)),
             [12387812, 9225469, 82284132],
         )
@@ -2986,7 +2688,7 @@ def test_rgb(memmap):
 
         image = lif.images[1]
         assert image.sizes == {'Y': 1536, 'X': 2048, 'S': 3}
-        assert numpy.array_equal(image.coords['S'], ['Red', 'Green', 'Blue'])
+        assert array_equal(image.coords['S'], ['Red', 'Green', 'Blue'])
         data = image.asarray()
         assert data.sum(dtype=numpy.uint64) == 86724120
 
@@ -2994,9 +2696,10 @@ def test_rgb(memmap):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_rgb_pad(memmap):
+def test_rgb_pad(memmap: Literal[False, True]) -> None:
     """Test read RGB with padding at end of rows."""
     filename = DATA / 'image.sc_108815/Cont HIF alpha.lif'
+
     with LifFile(filename, memmap=memmap) as lif:
         assert len(lif.images) == 20
         for i, image in enumerate(lif.images):
@@ -3017,20 +2720,69 @@ def test_rgb_pad(memmap):
                 data = image.asxarray()
                 assert data.shape == (531, 531, 3)
 
-            _assert_frames(image, data)
+            _assert_frames(image, data.data)
 
-        # out parameter doesn't work as expected
+        # out must have padded row length; returned array excludes padding
         out = numpy.zeros((531, 532, 3), numpy.uint8)
-        data = lif.images[1].asarray(out=out)
-        assert data.shape == (531, 531, 3)
-        assert data.sum(dtype=numpy.uint64) == 676414
+        im = lif.images[1]
+        assert isinstance(im, LifImage)
+        arr = im.asarray(out=out)
+        assert arr.shape == (531, 531, 3)
+        assert arr.sum(dtype=numpy.uint64) == 676414
 
         out = numpy.zeros((531, 531, 3), numpy.uint8)
         with pytest.raises(ValueError):
             lif.images[1].asarray(out=out)
 
 
-def test_channel_names_multiband():
+@pytest.mark.parametrize('memmap', [False, True])
+def test_rgb_pad_asarray_first(
+    caplog: pytest.LogCaptureFixture, memmap: Literal[False, True]
+) -> None:
+    """Test read RGB with padded rows before accessing sizes."""
+    filename = DATA / 'image.sc_108815/Cont HIF alpha.lif'
+    data = imread(filename, image=1, memmap=memmap)
+    assert 'array size' not in caplog.text
+    assert data.shape == (531, 531, 3)
+
+    with LifFile(filename, memmap=memmap) as lif:
+        image = lif.images[1]
+        assert isinstance(image, LifImage)
+        out = numpy.zeros((531, 532, 3), numpy.uint8)
+        expected = image.asarray(out=out)
+        assert array_equal(data, expected)
+        assert array_equal(image.frame(), expected)
+        assert array_equal(image.frames[0], expected)
+
+
+def test_channel_is_lut_inverted(scanmodes_file: pathlib.Path) -> None:
+    """Test IsLUTInverted='0' is parsed as False."""
+    with LifFile(scanmodes_file) as lif:
+        image = lif.images[0]
+        assert isinstance(image, LifImage)
+        element = image.xml_element.find('.//ChannelDescription')
+        assert element is not None
+        assert element.attrib['IsLUTInverted'] == '0'
+        assert not any(c.is_lut_inverted for c in image._channels)
+
+
+def test_parent_child_images_regex_path() -> None:
+    """Test parent_image and child_images with regex characters in path."""
+    filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
+    with LifFile(filename) as lif:
+        base = lif.images['sample1_slice1']
+        flim = lif.images['FLIM Compressed']
+        prefix = base.path
+        newprefix = 'sample(1)+[slice].1'
+        for image in lif.images:
+            if image.path == prefix or image.path.startswith(prefix + '/'):
+                image.path = newprefix + image.path[len(prefix) :]
+        assert flim.parent_image is base
+        assert flim in base.child_images
+        assert len(flim.child_images) == 9
+
+
+def test_channel_names_multiband() -> None:
     """Test channel names from MultiBand in ATLConfocalSettingDefinition."""
     filename = DATA / 'Experiment001.lif'
     with LifFile(filename) as lif:
@@ -3038,10 +2790,10 @@ def test_channel_names_multiband():
         assert image.sizes == {'C': 2, 'Y': 512, 'X': 512}
         # names come from MultiBand in main ATLConfocalSettingDefinition,
         # with 'Leica/' prefix stripped
-        assert numpy.array_equal(image.coords['C'], ['EGFP', 'dTomato'])
+        assert array_equal(image.coords['C'], ['EGFP', 'dTomato'])
 
 
-def test_channel_names_sequential():
+def test_channel_names_sequential() -> None:
     """Test channel names from MultiBand in sequential scan steps."""
     filename = DATA / 'Raw Stacks.lif'
     with LifFile(filename) as lif:
@@ -3050,13 +2802,11 @@ def test_channel_names_sequential():
         assert image.sizes == {'Z': 87, 'C': 3, 'Y': 256, 'X': 256}
         # names come from per-step MultiBand in LDM_Block_Sequential,
         # with 'Leica/' prefix stripped
-        assert numpy.array_equal(
-            image.coords['C'], ['ECFP', 'EYFP', 'mCherry']
-        )
+        assert array_equal(image.coords['C'], ['ECFP', 'EYFP', 'mCherry'])
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_issue_memoryblocks(memmap):
+def test_issue_memoryblocks(memmap: Literal[False, True]) -> None:
     """Test reading sequence of LifMemoryBlocks."""
     # this file failed with Liffile < 2026.1.22
     filename = DATA / 'image.sc_107410/Edu_examples.lif'
@@ -3084,37 +2834,40 @@ def test_issue_memoryblocks(memmap):
 
 @pytest.mark.parametrize('asxarray', [False, True])
 @pytest.mark.parametrize(
-    'output', ['ndarray', 'memmap', 'memmap:.', 'filename']
+    'output', ['ndarray', 'memmap', 'memmap:tmp', 'filename', 'fileobj']
 )
-def test_output(output, asxarray):
+def test_output(
+    *, output: str, asxarray: bool, tmp_path: pathlib.Path
+) -> None:
     """Test out parameter, including memmap."""
     filename = DATA / 'zenodo_3382102/y293-Gal4_vmat-GFP-f01.lif'
+    with contextlib.ExitStack() as stack:
+        out: Any
+        if output == 'ndarray':
+            out = numpy.zeros((86, 2, 500, 616), numpy.uint16)
+        elif output == 'filename':
+            out = str(tmp_path / 'out.bin')
+        elif output == 'fileobj':
+            out = stack.enter_context(open(tmp_path / 'out.bin', 'w+b'))
+        elif output == 'memmap:tmp':
+            out = f'memmap:{tmp_path}'
+        else:
+            out = 'memmap'
 
-    if output == 'ndarray':
-        out = numpy.zeros((86, 2, 500, 616), numpy.uint16)
-    elif output == 'filename':
-        out = tempfile.TemporaryFile()  # noqa: SIM115
-    elif output == 'memmap:.':
-        out = output
-    else:
-        out = 'memmap'
+        im = imread(filename, asxarray=asxarray, out=out)  # type: ignore[call-overload]
 
-    im = imread(filename, asxarray=asxarray, out=out)
-
-    if output == 'ndarray':
-        im = out
-        assert not isinstance(im, numpy.memmap)
-    elif asxarray:
-        assert isinstance(im.data, numpy.memmap), type(im.data)
-    else:
-        assert isinstance(im, numpy.memmap)
-    assert im[:, 1, 200, 300].sum(axis=0) == 1364
-    if output == 'filename':
-        out.close()
+        data = im.data if asxarray else im
+        if output == 'ndarray':
+            assert not isinstance(data, numpy.memmap)
+            assert numpy.shares_memory(data, out)
+        else:
+            assert isinstance(data, numpy.memmap), type(data)
+        assert data[:, 1, 200, 300].sum(axis=0) == 1364
+        del im, data
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_lof_no_image(memmap):
+def test_lof_no_image(memmap: Literal[False, True]) -> None:
     """Test LOF file with no image."""
     filename = (
         DATA
@@ -3131,8 +2884,10 @@ def test_lof_no_image(memmap):
 
 
 @pytest.mark.parametrize('memmap', [False, True])
-def test_lof_oldstyle(caplog, memmap):
-    """Test LOF file without LMSDataContainerHeader XML elementL."""
+def test_lof_oldstyle(
+    caplog: pytest.LogCaptureFixture, memmap: Literal[False, True]
+) -> None:
+    """Test LOF file without LMSDataContainerHeader XML element."""
     # the file is formally tested in test_xlif
     filename = (
         DATA
@@ -3152,9 +2907,85 @@ def test_lof_oldstyle(caplog, memmap):
         assert image.uuid is None
 
 
-def test_phasor_from_lif():
+def test_lof_oldstyle_xml_name(tmp_path: pathlib.Path) -> None:
+    """Test old-style LOF file with XML special characters in name."""
+    src = (
+        DATA
+        / 'Leica_Image_File_Format Examples_2015_08'
+        / '2015_03_16_14_16_18--Proj_LOF001'
+        / 'ImageXYC1.lof'
+    )
+    name = "A&B'1.lof" if os.name == 'nt' else "A&B'<1>.lof"
+    filename = tmp_path / name
+    filename.write_bytes(src.read_bytes())
+    with LifFile(filename) as lof:
+        assert lof.name == filename.stem
+        assert len(lof.images) == 1
+
+
+@pytest.mark.parametrize('memmap', [False, True])
+@pytest.mark.parametrize('stream', ['bytesio', 'openfile'])
+def test_xml_header_stream(stream: str, memmap: Literal[False, True]) -> None:
+    """Test xml_header of XML file opened from binary stream."""
+    filename = DATA / 'XLEFReaderForBioformats/Snail/XLEF-TIF Snail'
+    filename /= 'XLEF-TIF Snail.xlef'
+    with contextlib.ExitStack() as stack:
+        if stream == 'bytesio':
+            fh: Any = io.BytesIO(filename.read_bytes())
+        else:
+            fh = stack.enter_context(open(filename, 'rb'))
+        xlef = stack.enter_context(LifFile(fh, memmap=memmap))
+        assert xlef.type == LifFileType.XLEF
+        assert not fh.closed
+        assert xlef.xml_header() == filename.read_bytes().decode('utf-8-sig')
+
+
+def test_xml_no_version() -> None:
+    """Test XML file without Version attribute raises LifFileError."""
+    xml = (
+        b'<?xml version="1.0"?><LMSDataContainerHeader>'
+        b'<Element Name="x"/></LMSDataContainerHeader>'
+    )
+    with pytest.raises(LifFileError, match='Version'):
+        LifFile(io.BytesIO(xml))
+
+
+def test_children_closed_on_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test opened children are closed when opening another child fails."""
+    child = next(
+        (DATA / 'XLEFReaderForBioformats/Snail/XLEF-TIF Snail').rglob('*.xlif')
+    )
+    xml = (
+        '<?xml version="1.0"?><LMSDataContainerHeader Version="2">'
+        '<Element Name="x"><Data><Experiment/></Data><Children>'
+        f'<Reference File={quoteattr(str(child))}/>'
+        '<Reference File="missing.xlif"/>'
+        '</Children></Element></LMSDataContainerHeader>'
+    )
+    filename = tmp_path / 'test.xlef'
+    filename.write_text(xml, encoding='utf-8')
+
+    closed = []
+    close = LifFile.close
+
+    def close_spy(self: Any) -> None:
+        closed.append(self.filepath)
+        close(self)
+
+    monkeypatch.setattr(LifFile, 'close', close_spy)
+    with LifFile(filename) as xlef:
+        with pytest.raises(FileNotFoundError):
+            _ = xlef.children
+        assert os.path.normcase(str(child)) in {
+            os.path.normcase(p) for p in closed
+        }
+
+
+def test_phasor_from_lif(scanmodes_file: pathlib.Path) -> None:
     """Test PhasorPy phasor_from_lif function."""
-    from phasorpy.io import phasor_from_lif
+    phasor_from_lif = pytest.importorskip('phasorpy.io').phasor_from_lif
 
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
     mean, real, imag, attrs = phasor_from_lif(filename)
@@ -3168,7 +2999,7 @@ def test_phasor_from_lif():
     mean1, _real1, _imag1, attrs = phasor_from_lif(
         filename, image='FLIM Compressed'
     )
-    assert numpy.array_equal(mean1, mean)
+    assert array_equal(mean1, mean)
 
     # TODO: file does not contain FLIM raw metadata
     # filename = private_file('....lif')
@@ -3176,14 +3007,13 @@ def test_phasor_from_lif():
     # assert 'frequency' not in attrs
 
     # file does not contain FLIM data
-    filename = DATA / 'ScanModesExamples.lif'
     with pytest.raises(ValueError):
-        phasor_from_lif(filename)
+        phasor_from_lif(scanmodes_file)
 
 
-def test_signal_from_lif(scanmodes_file):
+def test_signal_from_lif(scanmodes_file: pathlib.Path) -> None:
     """Test PhasorPy signal_from_lif function."""
-    from phasorpy.io import signal_from_lif
+    signal_from_lif = pytest.importorskip('phasorpy.io').signal_from_lif
 
     signal = signal_from_lif(scanmodes_file)
     assert signal.dims == ('C', 'Y', 'X')
@@ -3219,14 +3049,14 @@ def test_signal_from_lif(scanmodes_file):
 
 @pytest.mark.parametrize('path', ['FLIM', 'flim'])
 @pytest.mark.parametrize('name', ['FLIM', 'flim'])
-def test_case_sensitive_path(path, name):
+def test_case_sensitive_path(path: str, name: str) -> None:
     """Test case_sensitive_path function."""
     assert case_sensitive_path(
         str(DATA / f'case_sensitive/{path}_testdata/{name}_testdata.xlef')
     ) == str(DATA / 'case_sensitive/FLIM_testdata/FLIM_testdata.xlef')
 
 
-def test_xml2dict():
+def test_xml2dict() -> None:
     """Test xml2dict function."""
     xml = ElementTree.fromstring("""<?xml version="1.0" ?>
     <root attr="attribute">
@@ -3253,10 +3083,14 @@ def test_xml2dict():
 
 
 @pytest.mark.skipif(
-    not hasattr(sys, '_is_gil_enabled'), reason='Python < 3.12'
+    not hasattr(sys, '_is_gil_enabled'), reason='Python < 3.13'
 )
-def test_gil_enabled():
-    """Test that GIL is disabled on thread-free Python."""
+@pytest.mark.skipif(
+    'PYTHON_GIL' in os.environ or 'gil' in sys._xoptions,
+    reason='GIL overridden',
+)
+def test_gil_enabled() -> None:
+    """Test that GIL state is consistent with build configuration."""
     assert sys._is_gil_enabled() != sysconfig.get_config_var('Py_GIL_DISABLED')
 
 
@@ -3269,12 +3103,11 @@ def test_gil_enabled():
         )
     ),
 )
-def test_glob(filename):
+def test_glob(filename: str) -> None:
     """Test read all LIF files."""
     if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
-    filename = DATA / filename
-    with LifFile(filename, memmap=True) as lif:
+    with LifFile(DATA / filename, memmap=True) as lif:
         str(lif)
         if lif.type == LifFileType.LIFEXT:
             assert len(lif.images) > 0
@@ -3316,6 +3149,3 @@ if __name__ == '__main__':
     argv.append('--cov=liffile')
     argv.append('--verbose')
     sys.exit(pytest.main(argv))
-
-# mypy: allow-untyped-defs
-# mypy: check-untyped-defs=False
