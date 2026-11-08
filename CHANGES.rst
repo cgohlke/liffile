@@ -1,5 +1,20 @@
+..
+  This file is updated by setup.py. Do not edit.
+
 Revisions
 =========
+
+2026.11.8
+
+- Fix reading stride-aligned RGB images and frames.
+- Fix LifFile.xml_header truncated for memory-mapped XML files.
+- Fix LifChannel.is_lut_inverted always True.
+- Fix images with duplicate paths in child files overwritten.
+- Fix parent_image and child_images with regex characters in paths.
+- Fix reading frames of images with multiple channel axes.
+- Fix child files not closed when opening child fails.
+- Fix old-style LOF files with XML special characters in file name.
+- Raise LifFileError instead of KeyError or AssertionError for corrupted files.
 
 2026.10.14
 
