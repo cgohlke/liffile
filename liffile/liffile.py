@@ -40,7 +40,7 @@ experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.14
+:Version: 2026.11.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -63,17 +63,29 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.9.20
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.8
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
 
 Revisions
 ---------
+
+2026.11.8
+
+- Fix reading stride-aligned RGB images and frames.
+- Fix LifFile.xml_header truncated for memory-mapped XML files.
+- Fix LifChannel.is_lut_inverted always True.
+- Fix images with duplicate paths in child files overwritten.
+- Fix parent_image and child_images with regex characters in paths.
+- Fix reading frames of images with multiple channel axes.
+- Fix child files not closed when opening child fails.
+- Fix old-style LOF files with XML special characters in file name.
+- Raise LifFileError instead of KeyError or AssertionError for corrupted files.
 
 2026.10.14
 
@@ -144,7 +156,7 @@ extensions).
 
 This library is not feature-complete. Unsupported features currently include
 image mosaics and pyramids, bit increments, heterogeneous channel dtypes,
-and non-image data such asraw FLIM/TCSPC histogram data.
+and non-image data such as raw FLIM/TCSPC histogram data.
 
 The library has been tested with only a limited number of version 2 files.
 
@@ -217,7 +229,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.10.14'
+__version__ = '2026.11.8'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -259,13 +271,14 @@ from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, final, overload, override
 from urllib.parse import unquote
 from xml.etree import ElementTree
+from xml.sax.saxutils import quoteattr
 
 if TYPE_CHECKING:
     from collections.abc import Container, Iterable, Iterator
     from types import TracebackType
     from typing import IO, Any, ClassVar, Literal, Self
 
-    from numpy.typing import DTypeLike, NDArray
+    from numpy.typing import ArrayLike, DTypeLike, NDArray
     from tifffile import TiffFile
     from xarray import DataArray
 
@@ -362,7 +375,8 @@ def imread(
             array in the specified file.
         **kwargs:
             Optional arguments to :py:meth:`LifImageABC.asarray`,
-            :py:meth:`LifImageABC.asxarray`, or :py:meth:`LifImage.frames`.
+            :py:meth:`LifImageABC.asxarray`, or
+            :py:meth:`LifImageFrames.asarray` if ``selection`` is specified.
 
     Returns:
         :
@@ -419,23 +433,33 @@ class LifFileType(enum.Enum):
 class BinaryFile:
     """Binary file.
 
+    :Version: 2026.11.1
+
     Parameters:
         file:
-            File name or seekable binary stream.
+            File name, seekable binary stream, fsspec OpenFile, or mmap.
         mode:
             File open mode if ``file`` is a file name.
             If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
+            Ignored for streams and other file objects.
         memmap:
             Map file into memory.
             Ignored if memory mapping is not available or if the stream does
             not support it.
+            ``mmap.mmap`` objects are always accessed directly.
 
     Notes:
         Memory mapping can improve random-access read performance on large
         files or repeated reads of the same file regions by reducing syscall
         overhead and data copying.
         For sequential one-pass reads, regular buffered I/O may be faster.
+
+        File access is not thread-safe unless the file is memory-mapped
+        or ``set_lock(True)`` was called.
+
+        This class is shared (inlined) among many modules, for example,
+        czifile, liffile, sdtfile, orifile, obffile, ptufile, and fbdfile.
 
     Raises:
         TypeError:
@@ -475,7 +499,7 @@ class BinaryFile:
         self._memmap = bool(memmap)
         self._lock = contextlib.nullcontext()
 
-        if isinstance(file, (str, os.PathLike)):
+        if isinstance(file, str | os.PathLike):
             ext = os.path.splitext(file)[-1].lower()
             if self._ext and ext not in self._ext:
                 msg = f'invalid file extension: {ext!r} not in {self._ext!r}'
@@ -502,57 +526,84 @@ class BinaryFile:
                 raise TypeError(msg)
 
             self._fh = file
-            try:
-                self._fh.tell()
-            except Exception as exc:
+            if not self._is_seekable(self._fh):
                 msg = f'{file=!r} is not seekable'
-                raise ValueError(msg) from exc
-            if hasattr(file, 'path'):
-                self._path = os.path.abspath(file.path)
-            elif hasattr(file, 'name'):
-                self._path = os.path.abspath(file.name)
+                raise ValueError(msg)
+            self._path = self._file_path(file)
 
         elif hasattr(file, 'open'):
             # fsspec OpenFile
             self._fh = file.open()
             self._close = True
-            try:
-                self._fh.tell()
-            except Exception as exc:
+            fh: object = self._fh
+            if isinstance(fh, io.TextIOBase):
+                with contextlib.suppress(Exception):
+                    fh.close()
+                msg = f'{file=!r} is not open in binary mode'
+                raise TypeError(msg)
+            if not self._is_seekable(self._fh):
                 with contextlib.suppress(Exception):
                     self._fh.close()
                 msg = f'{file=!r} is not seekable'
-                raise ValueError(msg) from exc
-            if hasattr(file, 'path'):
-                self._path = os.path.abspath(file.path)
+                raise ValueError(msg)
+            self._path = self._file_path(file)
 
         else:
             msg = f'cannot handle {type(file)=}'
             raise TypeError(msg)
 
-        if hasattr(file, 'name') and file.name:
-            self._name = os.path.basename(file.name)
+        name = getattr(file, 'name', None)
+        if isinstance(name, str | os.PathLike) and os.fspath(name):
+            self._name = os.path.basename(name)
         elif self._path:
             self._name = os.path.basename(self._path)
         else:
             self._name = type(file).__name__
 
-        if memmap:
-            _fh: Any = self._fh
-            if isinstance(_fh, mmap.mmap):
-                self._mm = _fh
+        _fh: Any = self._fh
+        if isinstance(_fh, mmap.mmap):
+            # mmap objects lack readinto and writable
+            self._mm = _fh
+            self._mv = memoryview(self._mm)
+        elif memmap:
+            try:
+                access = (
+                    mmap.ACCESS_WRITE
+                    if self._fh.writable()
+                    else mmap.ACCESS_READ
+                )
+                self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
                 self._mv = memoryview(self._mm)
-            else:
-                try:
-                    access = (
-                        mmap.ACCESS_WRITE
-                        if self._fh.writable()
-                        else mmap.ACCESS_READ
-                    )
-                    self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
-                    self._mv = memoryview(self._mm)
-                except OSError:
-                    pass
+            except (OSError, ValueError, AttributeError):
+                # empty file or stream without file descriptor
+                pass
+
+    @staticmethod
+    def _is_seekable(fh: Any, /) -> bool:
+        """Return whether file handle supports random access."""
+        try:
+            fh.tell()
+            # e.g. fsspec HTTPStreamFile for servers without range requests
+            seekable = getattr(fh, 'seekable', None)
+            return seekable is None or bool(seekable())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _file_path(file: Any, /) -> str:
+        """Return path of file object, absolute if on local file system."""
+        path = getattr(file, 'path', None)
+        if isinstance(path, str) and path:
+            protocol = getattr(getattr(file, 'fs', None), 'protocol', 'file')
+            if isinstance(protocol, str):
+                protocol = (protocol,)
+            if 'file' in protocol or 'local' in protocol:
+                return os.path.abspath(path)
+            return path
+        name = getattr(file, 'name', None)
+        if isinstance(name, str | os.PathLike) and os.fspath(name):
+            return os.path.abspath(name)
+        return ''
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -600,6 +651,7 @@ class BinaryFile:
             enabled:
                 If true, use a threading.RLock, else a no-op lock.
                 Has no effect when memory-mapped I/O is active.
+                Do not call while other threads access the file.
 
         """
         if self._mm is not None:
@@ -616,13 +668,23 @@ class BinaryFile:
             data: Data to write.
 
         """
-        if self._mm is not None and self.writable:
-            # writable mmap: direct slice write, no cursor movement
-            self._mm[offset : offset + len(data)] = data
+        mv = self._mv
+        if mv is not None and not mv.readonly:
+            # slicing would silently write at negative or clipped offsets
+            end = offset + len(data)
+            if offset < 0 or end > len(mv):
+                msg = (
+                    f'cannot write {len(data)} bytes at {offset=} past end '
+                    f'of memory-mapped file of size {len(mv)}'
+                )
+                raise ValueError(msg)
+            mv[offset:end] = data
         else:
+            # regular streams reject negative offsets
             with self._lock:
                 self._fh.seek(offset)
                 self._fh.write(data)
+            self.__dict__.pop('filesize', None)
 
     def _read_at(self, offset: int, size: int, /) -> bytes | memoryview:
         """Read bytes from file at given offset.
@@ -633,12 +695,21 @@ class BinaryFile:
 
         Parameters:
             offset: Byte offset from start of file.
-            size: Number of bytes to read.
+            size: Number of bytes to read. If ``-1``, read to end of file.
 
         """
+        # hot path for small reads; regular streams reject bad arguments
         mv = self._mv
         if mv is not None:
+            if offset < 0 or size < 0:
+                # slicing would silently misread; size=-1 reads to end
+                if offset < 0 or size < -1:
+                    msg = f'{offset=} < 0 or {size=} < -1'
+                    raise ValueError(msg)
+                return mv[offset:]
             return mv[offset : offset + size]
+        # do not allocate more than available for corrupted sizes
+        # size = min(size, max(0, self.filesize - offset))
         fh = self._fh
         with self._lock:
             fh.seek(offset)
@@ -655,9 +726,16 @@ class BinaryFile:
             Number of bytes read.
 
         """
+        # hot path for bulk reads shared by many modules: keep it minimal.
+        # Buffered streams fill the buffer in one readinto call until EOF;
+        # do not add short-read loops or typed-buffer handling here.
         nbytes = len(buffer)
         mv = self._mv
         if mv is not None:
+            if offset < 0:
+                # slicing would silently index from the end of the map
+                msg = f'{offset=} < 0'
+                raise ValueError(msg)
             n = min(nbytes, max(0, len(mv) - offset))
             buffer[:n] = numpy.frombuffer(mv[offset : offset + n], numpy.uint8)
             return n
@@ -667,9 +745,10 @@ class BinaryFile:
             fh.seek(offset)
             try:
                 return fh.readinto(buffer)  # type: ignore[attr-defined, no-any-return]
-            except (AttributeError, OSError):
+            except (AttributeError, io.UnsupportedOperation):
+                # stream without readinto; do not swallow real I/O errors
                 data = fh.read(nbytes)
-                buffer[:] = numpy.frombuffer(data, numpy.uint8)
+                buffer[: len(data)] = numpy.frombuffer(data, numpy.uint8)
                 return len(data)
 
     def _read_array(
@@ -701,6 +780,7 @@ class BinaryFile:
             writable:
                 By default, return read-only array from memory-mapped file.
                 Prevents accidental modification of underlying writable file.
+                Arrays from read-only memory maps are always read-only.
                 Has no effect for non-memory-mapped files (always writable).
             truncate:
                 Allow partial reads of array.
@@ -709,36 +789,43 @@ class BinaryFile:
         """
         dtype = numpy.dtype(dtype)
         itemsize = dtype.itemsize
-        if offset < 0:
-            msg = f'{offset=} < 0'
-            raise ValueError(msg)
-        if count < -1:
-            msg = f'{count=} < -1'
-            raise ValueError(msg)
 
         mv = self._mv
         if mv is not None:
+            if offset < 0 or count < -1:
+                # slicing would silently misread; regular streams raise
+                msg = f'{offset=} < 0 or {count=} < -1'
+                raise ValueError(msg)
             if count == -1:
                 count = max(0, (len(mv) - offset) // itemsize)
             nbytes = count * itemsize
             size = min(nbytes, max(0, len(mv) - offset))
             n = size - size % itemsize
-            array = numpy.frombuffer(
-                mv[offset : offset + n],
-                dtype,
-            )
             if copy:
-                array = array.copy()
-            elif not writable and array.flags.writeable:
-                array.flags.writeable = False
+                # ndarray.copy is slow for structured dtypes
+                array = numpy.frombuffer(
+                    bytearray(mv[offset : offset + n]), dtype
+                )
+            else:
+                array = numpy.frombuffer(mv[offset : offset + n], dtype)
+                if not writable and array.flags.writeable:
+                    array.flags.writeable = False
         elif count > -1:
+            # read directly; routing through _read_into adds per-call overhead
             fh = self._fh
             nbytes = count * itemsize
+            # do not allocate more than available for corrupted sizes
+            # available = max(0, (self.filesize - offset) // itemsize)
+            # array = numpy.empty(min(count, available), dtype)
             array = numpy.empty(count, dtype)
             with self._lock:
                 fh.seek(offset)
-                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+                # array.data builds slow PEP 3118 format for structured dtypes
+                n = fh.readinto(array)  # type: ignore[attr-defined]
         else:
+            if count < -1:
+                msg = f'{count=} < -1'
+                raise ValueError(msg)
             fh = self._fh
             with self._lock:
                 fh.seek(0, os.SEEK_END)
@@ -747,7 +834,7 @@ class BinaryFile:
                 nbytes = count * itemsize
                 array = numpy.empty(count, dtype)
                 fh.seek(offset)
-                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+                n = fh.readinto(array)  # type: ignore[attr-defined]
 
         if n != nbytes:
             array = array[: n // itemsize]
@@ -765,10 +852,12 @@ class BinaryFile:
         if self._mm is not None:
             return len(self._mm)
         fh = self._fh
-        try:
-            return os.fstat(fh.fileno()).st_size
-        except (AttributeError, io.UnsupportedOperation, OSError):
-            pass
+        if not fh.writable():
+            # fstat does not see unflushed writes
+            try:
+                return os.fstat(fh.fileno()).st_size
+            except (AttributeError, io.UnsupportedOperation, OSError):
+                pass
         with self._lock:
             pos = fh.tell()
             fh.seek(0, os.SEEK_END)
@@ -779,6 +868,8 @@ class BinaryFile:
     @property
     def writable(self) -> bool:
         """File is open for writing."""
+        if self._mv is not None:
+            return not self._mv.readonly
         return self._fh.writable()
 
     @property
@@ -978,7 +1069,7 @@ class LifFile(BinaryFile):
                     name = 'Unnamed'
                 xml_header = (
                     '<LMSDataContainerHeader Version="2">'
-                    f'<Element Name="{name}">'  # no UniqueID
+                    f'<Element Name={quoteattr(name)}>'  # no UniqueID
                     f'{xml_header}'
                     '</Element></LMSDataContainerHeader>'
                 )
@@ -1002,7 +1093,7 @@ class LifFile(BinaryFile):
         except KeyError:
             if self.type != LifFileType.LOF:
                 msg = 'Version attribute not found in XML'
-                raise KeyError(msg) from None
+                raise LifFileError(msg) from None
 
         # add memory blocks
         if self.type == LifFileType.LOF:
@@ -1036,7 +1127,9 @@ class LifFile(BinaryFile):
             LifFileType.XLEF,
             LifFileType.XLCF,
         }:
-            assert element is not None
+            if element is None:
+                msg = 'Element element not found in XML'
+                raise LifFileError(msg)
             if element.find('./Data/Collection') is not None:
                 self.type = LifFileType.XLCF
             elif element.find('./Data/Experiment') is not None:
@@ -1075,22 +1168,31 @@ class LifFile(BinaryFile):
         """Children references in XLEF, XLCF, and XLLF files."""
         dirname = self.dirname
         children: list[LifFile] = []
-        for child in self.xml_element.findall('./Element/Children/Reference'):
-            filename = child.attrib.get('File')
-            if filename is None:
-                continue
-            filename = os.path.normpath(unquote(filename)).replace('\\', '/')
-            filename = os.path.join(dirname, filename)
-            if not os.path.exists(filename):
-                filename = case_sensitive_path(filename)
-            children.append(
-                LifFile(
-                    filename,
-                    memmap=self._memmap,
-                    squeeze=self._squeeze,
-                    _parent=self,
+        try:
+            for child in self.xml_element.findall(
+                './Element/Children/Reference'
+            ):
+                filename = child.attrib.get('File')
+                if filename is None:
+                    continue
+                filename = os.path.normpath(unquote(filename)).replace(
+                    '\\', '/'
                 )
-            )
+                filename = os.path.join(dirname, filename)
+                if not os.path.exists(filename):
+                    filename = case_sensitive_path(filename)
+                children.append(
+                    LifFile(
+                        filename,
+                        memmap=self._memmap,
+                        squeeze=self._squeeze,
+                        _parent=self,
+                    )
+                )
+        except BaseException:
+            for lif in children:
+                lif.close()
+            raise
         return tuple(children)
 
     @property
@@ -1301,7 +1403,7 @@ class LifImageABC(ABC):
 
         dirname = self.path.rsplit('/', 1)[0]
         if self.parent.type != LifFileType.LIFEXT or '/' in dirname:
-            return parent.images.find(f'^{dirname}$')
+            return parent.images.find(f'^{re.escape(dirname)}$', flags=0)
 
         # LIFEXT root image references image in parent LIF file
         # via MemoryBlockID.
@@ -1322,7 +1424,9 @@ class LifImageABC(ABC):
         #     for image in self.parent.images
         #     if image.parent_image is self
         # )
-        return self.parent.images.findall(f'^{self.path}/[^/]*$')
+        return self.parent.images.findall(
+            f'^{re.escape(self.path)}/[^/]*$', flags=0
+        )
 
     @cached_property
     def memory_block(self) -> LifMemoryBlock:
@@ -1412,9 +1516,12 @@ class LifImageABC(ABC):
         columns = 115
         name = self.__class__.__name__
         path = self.path
-        dtype = self.dtype
+        try:
+            dtype = self.dtype
+            sizes = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
+        except Exception as exc:
+            return f'<{name} {path!r} {exc.__class__.__name__}: {exc}>'
         prefix = ''
-        sizes = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
         while True:
             r = f'<{name} {(prefix + path)!r} ({sizes}) {dtype}>'
             if len(r) < columns or '/' not in path:
@@ -1430,7 +1537,7 @@ class LifImageABC(ABC):
                 if callable(value):
                     return None
                 return f'{name}: {value!r}'[:160]
-            except (NotImplementedError, AttributeError):
+            except Exception:
                 return None
 
         return indent(
@@ -1528,7 +1635,8 @@ class LifImage(LifImageABC):
                     float(channel.attrib['Max']),
                     channel.attrib['Unit'],
                     channel.attrib['LUTName'],
-                    bool(channel.attrib['IsLUTInverted']),
+                    channel.attrib['IsLUTInverted'].strip().lower()
+                    in {'1', 'true'},
                     int(channel.attrib['BytesInc']),
                     int(channel.attrib['BitInc']),
                 )
@@ -1710,7 +1818,9 @@ class LifImage(LifImageABC):
                         ax = 'C' if 'C' not in sizes else f'C{ch}'
                         ch += 1
                     sizes[ax] = size
-                    assert nchannels % size == 0
+                    if nchannels % size != 0:
+                        msg = f'{nchannels=} not divisible by {size=}'
+                        raise LifFileError(msg)
                     nchannels //= size
                 elif (
                     dim.label == 'Y'
@@ -1720,11 +1830,13 @@ class LifImage(LifImageABC):
                 ):
                     # account for stride-aligned RGB rows
                     size = dim.bytes_inc // (sizes['S'] * self.dtype.itemsize)
+                    if size <= sizes['X']:
+                        msg = f'stored row length {size} <= {sizes["X"]=}'
+                        raise LifFileError(msg)
                     sizes_stored['X'] = size
-                    assert sizes_stored['X'] > sizes['X']
                 else:
                     msg = (
-                        f'{stride=} % {dim.bytes_inc=} '
+                        f'{dim.bytes_inc=} % {stride=} '
                         f'== {dim.bytes_inc % stride} != 0'
                     )
                     raise ValueError(msg)
@@ -1962,9 +2074,10 @@ class LifImage(LifImageABC):
             which supports per-dimension selections and discontiguous storage.
 
         """
+        shape = self.shape  # sets _shape_stored
         if self._shape_stored is None:
             data = self.memory_block.read_array(
-                self.shape, self.dtype, mode=mode, out=out
+                shape, self.dtype, mode=mode, out=out
             )
         else:
             # shape_stored differs from shape (e.g., stride-aligned rows)
@@ -1972,7 +2085,7 @@ class LifImage(LifImageABC):
             data = self.memory_block.read_array(
                 self._shape_stored, self.dtype, mode=mode, out=out
             )
-            data = data[tuple(slice(size) for size in self.shape)]
+            data = data[tuple(slice(size) for size in shape)]
         if self._is_bgr:
             # BGR to RGB
             if not data.flags.writeable:
@@ -2144,7 +2257,7 @@ class LifFlimImage(LifImageABC):
 
         """
         fmt = self.attrs['RawData']['Format']
-        msg = f'format={fmt!r} is patent-pending'
+        msg = f'format={fmt!r} is patented'
         raise NotImplementedError(msg)
 
 
@@ -2197,6 +2310,12 @@ class LifImageFrames:
             if key not in image.sizes:
                 msg = f'unknown dimension {key!r}'
                 raise KeyError(msg)
+            if key in self.frame_sizes:
+                msg = (
+                    f'cannot select frame dimension {key!r}; '
+                    f'frame dimensions {self.frame_dims} are fixed'
+                )
+                raise ValueError(msg)
 
     def __call__(
         self,
@@ -2235,15 +2354,6 @@ class LifImageFrames:
         image = self._image
         frame_dims = set(self.frame_sizes.keys())
 
-        # validate selection keys now that frame_sizes is computed
-        for key in self._selection:
-            if key in frame_dims:
-                msg = (
-                    f'cannot select frame dimension {key!r}; '
-                    f'frame dimensions {tuple(frame_dims)} are fixed'
-                )
-                raise ValueError(msg)
-
         iter_dims: list[str] = []
         iter_sizes: list[int] = []
         iter_ranges: list[Sequence[int]] = []
@@ -2258,21 +2368,19 @@ class LifImageFrames:
             iter_ranges.append(range(size))
 
         # add specified non-frame dimensions in order of specification
-        for dim, sel in self._selection.items():
-            # No need to check frame_dims - already validated above
-
-            size = image.sizes[dim]
+        for key, sel in self._selection.items():
+            size = image.sizes[key]
             match sel:
                 case None:
                     # iterate all
                     iter_sizes.append(size)
                     iter_ranges.append(range(size))
-                case _ if isinstance(sel, (int, numpy.integer)):
+                case _ if isinstance(sel, int | numpy.integer):
                     # fixed index
                     if not 0 <= sel < size:
                         msg = (
                             f'index {sel} out of bounds '
-                            f'for dimension {dim!r} with size {size}'
+                            f'for dimension {key!r} with size {size}'
                         )
                         raise IndexError(msg)
                     iter_sizes.append(1)
@@ -2287,13 +2395,13 @@ class LifImageFrames:
                         if not 0 <= idx < size:
                             msg = (
                                 f'index {idx} out of bounds '
-                                f'for dimension {dim!r} with size {size}'
+                                f'for dimension {key!r} with size {size}'
                             )
                             raise IndexError(msg)
                     iter_sizes.append(len(sel))
                     iter_ranges.append(sel)
 
-            iter_dims.append(dim)
+            iter_dims.append(key)
 
         full_dims: tuple[str, ...] | None = None
         full_ranges: tuple[Sequence[int], ...] | None = None
@@ -2403,12 +2511,15 @@ class LifImageFrames:
             offset += idx * dim.bytes_inc
 
         # determine channel and its dtype
-        channel_idx = indices.get('C', 0)
         if image._channels:
-            # when S is in frame_dims, channels are grouped by C
-            # with S samples per C, so index is C * S
-            if 'S' in frame_dims:
-                channel_idx *= image.sizes.get('S', 1)
+            # linear channel index over synthetic channel axes (S, C, C1, ...)
+            dim_labels = {dim.label for dim in image._dimensions}
+            channel_idx = 0
+            for ax in image.dims:
+                if ax in dim_labels:
+                    continue
+                idx = 0 if ax in frame_dims else indices.get(ax, 0)
+                channel_idx = channel_idx * image.sizes[ax] + idx
             channel = image._channels[channel_idx]
             offset += channel.bytes_inc
             dtype = channel.dtype
@@ -2453,11 +2564,19 @@ class LifImageFrames:
             msg = 'memory block has no offset and no frames'
             raise ValueError(msg)
 
+        stored_shape = frame_shape
+        if image._shape_stored is not None:
+            # stride-aligned rows: read padded frame and crop
+            stored = dict(zip(image.dims, image._shape_stored, strict=True))
+            stored_shape = tuple(stored[d] for d in self.frame_sizes)
         data = image.parent._read_array(
-            memblock.offset + offset, product(frame_shape), dtype
+            memblock.offset + offset, product(stored_shape), dtype
         )
+        data = data.reshape(stored_shape)
+        if stored_shape != frame_shape:
+            data = data[tuple(slice(size) for size in frame_shape)]
         result = create_output(out, frame_shape, dtype)
-        result[:] = data.reshape(frame_shape)
+        result[:] = data
         if image._is_bgr:
             result[:] = result[..., ::-1]  # BGR to RGB
         return result
@@ -2638,7 +2757,7 @@ class LifImageFrames:
                     match sel:
                         case None:
                             result[dim] = coord_array
-                        case _ if isinstance(sel, (int, numpy.integer)):
+                        case _ if isinstance(sel, int | numpy.integer):
                             result[dim] = coord_array[sel : sel + 1]
                         case slice():
                             result[dim] = coord_array[sel]
@@ -2720,8 +2839,6 @@ class LifImageFrames:
             Array with :py:attr:`shape` and :py:attr:`dtype`.
 
         """
-        if not self.shape:
-            return numpy.array([], self.dtype)
         result = create_output(out, self.shape, self.dtype)
         for index, frame in self.items():
             result[index] = frame
@@ -2897,7 +3014,7 @@ class LifImageFrames:
         """
         info = self._info
 
-        if isinstance(key, (int, numpy.integer)):
+        if isinstance(key, int | numpy.integer):
             # convert linear to ND local
             nd_local = self.unravel_index(int(key), global_=False)
         elif isinstance(key, tuple):
@@ -2908,8 +3025,12 @@ class LifImageFrames:
                     f'number of iteration dimensions {len(info.dims)}'
                 )
                 raise IndexError(msg)
+            for idx, size in zip(nd_local, info.shape, strict=True):
+                if not 0 <= idx < size:
+                    msg = f'index {idx} out of bounds for size {size}'
+                    raise IndexError(msg)
         else:
-            msg = f'indices must be int or tuple, not {type(key).__name__}'
+            msg = f'indices must be int or tuple, not {type(key).__name__}'  # type: ignore[unreachable]
             raise TypeError(msg)
 
         # convert local ND to global ND directly
@@ -3014,30 +3135,31 @@ class LifImageSeries(Sequence[LifImageABC]):
                     image = LifImage(parent, element, path_)
                 else:
                     image = LifFlimImage(parent, element, path_)
-                # LAS X usually refuses to write images with duplicate paths.
-                # However, paths from XML may in principle collide, hence the
-                # renaming logic, which is opaque to users.
-                if path_ in self._images:
-                    for i in range(1, 1000):
-                        # this loop generates readable keys;
-                        # remove if performance becomes an issue
-                        new_path = f'{path_}~{i:03}'
-                        if new_path not in self._images:
-                            path_ = new_path
-                            break
-                    else:
-                        # fall back to uuid;
-                        # image.uuid cannot be used because it may be None
-                        path_ = f'{path_}_{uuid.uuid4().hex}'
-                self._images[path_] = image
+                self._add(path_, image)
 
         for child in parent.children:
             for image in child.images:
                 path = image.path
                 if parent.type not in {LifFileType.XLEF, LifFileType.XLLF}:
                     path = f'{parent.name}/{path}'
-                self._images[path] = image
                 image.path = path
+                self._add(path, image)
+
+    def _add(self, path: str, image: LifImageABC, /) -> None:
+        """Add image under unique key derived from path."""
+        # LAS X usually refuses to write images with duplicate paths.
+        # However, paths from XML may in principle collide, hence the
+        # renaming logic, which is opaque to users.
+        if path in self._images:
+            for i in range(1, 1000):
+                new_path = f'{path}~{i:03}'
+                if new_path not in self._images:
+                    path = new_path
+                    break
+            else:
+                # image.uuid cannot be used because it may be None
+                path = f'{path}_{uuid.uuid4().hex}'
+        self._images[path] = image
 
     @staticmethod
     def _image_iter(
@@ -3142,8 +3264,8 @@ class LifImageSeries(Sequence[LifImageABC]):
             KeyError: if no image with matching path pattern found.
 
         """
-        if isinstance(key, int):
-            index = key
+        if isinstance(key, int | numpy.integer):
+            index = int(key)
             try:
                 key = tuple(self._images.keys())[index]
             except IndexError:
@@ -3279,13 +3401,13 @@ class LifMemoryBlock:
                 file = self.frames[0].file.lower()
                 if file.endswith('.lof'):
                     self.type = LifMemoryBlockType.LOF
-                elif file.endswith('.ome.tif'):
+                elif file.endswith(('.ome.tif', '.ome.tiff')):
                     self.type = LifMemoryBlockType.OME
-                elif file.endswith('.aivia.tif'):
+                elif file.endswith(('.aivia.tif', '.aivia.tiff')):
                     self.type = LifMemoryBlockType.AIVIA
-                elif file.endswith('.tif'):
+                elif file.endswith(('.tif', '.tiff')):
                     self.type = LifMemoryBlockType.TIF
-                elif file.endswith('.jpg'):
+                elif file.endswith(('.jpg', '.jpeg')):
                     self.type = LifMemoryBlockType.JPG
                 elif file.endswith('.png'):
                     self.type = LifMemoryBlockType.PNG
@@ -3365,7 +3487,7 @@ class LifMemoryBlock:
         """
         buffer: bytes | bytearray | memoryview
 
-        if len(self.frames) == 1 and self.frames[0].file.endswith('.lof'):
+        if len(self.frames) == 1 and self.type == LifMemoryBlockType.LOF:
             # allow reading FLIM data from LOF file
             path = os.path.join(self.parent.dirname, self.frames[0].file)
             if not os.path.exists(path):
@@ -3706,7 +3828,7 @@ if imagecodecs is not None:
     def imread_jpg(filename: str, /, **kwargs: Any) -> NDArray[Any]:
         with open(filename, 'rb') as fh:
             data = fh.read()
-        return imagecodecs.jpeg8_decode(data, **kwargs)
+        return imagecodecs.jpeg_decode(data, **kwargs)
 
     def imread_png(filename: str, /, **kwargs: Any) -> NDArray[Any]:
         with open(filename, 'rb') as fh:
@@ -3725,7 +3847,7 @@ else:
     ) -> NDArray[Any]:
         del kwargs
         msg = (
-            f'reading {os.path.splitext(filename)!r} '
+            f'reading {os.path.splitext(filename)[1]!r} '
             "files requires the 'imagecodecs' package"
         )
         raise ImportError(msg)
@@ -3736,7 +3858,9 @@ else:
 IMREAD: dict[str, Callable[..., NDArray[Any]]] = {
     '.lof': imread,
     '.tif': imread_tif,
+    '.tiff': imread_tif,
     '.jpg': imread_jpg,
+    '.jpeg': imread_jpg,
     '.png': imread_png,
     '.bmp': imread_bmp,
 }
@@ -3774,11 +3898,13 @@ XML_CODEC = {
     b'<\x00?\x00': 'utf-16-le',
     b'\x00<\x00?': 'utf-16-be',
     b'\xff\xfe<\x00': 'utf-16',
+    b'\xfe\xff\x00<': 'utf-16',
     1836597052: 'utf-8',
     1019198447: 'utf-8-sig',
     4128828: 'utf-16-le',
     1056979968: 'utf-16-be',
     3997439: 'utf-16',
+    1006698494: 'utf-16',
 }
 """Map XML first four bytes to codec."""
 
@@ -3803,13 +3929,13 @@ def create_output(
     *,
     mode: Literal['r+', 'w+', 'r', 'c'] = 'w+',
     suffix: str | None = None,
-    fillvalue: float | None = None,
+    fillvalue: ArrayLike | None = None,
 ) -> NDArray[Any] | numpy.memmap[Any, Any]:
     """Return NumPy array where data of shape and dtype can be copied.
 
     Parameters:
         out:
-            Specifies kind of array of ``shape`` and ``dtype`` to return:
+            Kind of array of ``shape`` and ``dtype`` to return:
 
                 ``None``:
                     Return new array.
@@ -3827,13 +3953,14 @@ def create_output(
             data type.
         mode:
             File mode to create memory-mapped array.
-            The default is ``'w+'`` to create new, or overwrite existing file
-            for reading and writing.
+            Default: ``'w+'``. Creates new or overwrites existing file for
+            reading and writing.
         suffix:
             Suffix of ``NamedTemporaryFile`` if ``out`` is ``'memmap'``.
-            The default is ``'.memmap'``.
+            Default: ``'.memmap'``.
         fillvalue:
             Value to initialize output array.
+            Must be broadcastable to ``shape``.
             By default, return uninitialized array.
 
     Returns:
@@ -3850,9 +3977,10 @@ def create_output(
     if out is None:
         if fillvalue is None:
             return numpy.empty(shape, dtype)
-        if fillvalue:
-            return numpy.full(shape, fillvalue, dtype)
-        return numpy.zeros(shape, dtype)
+        if numpy.ndim(fillvalue) == 0 and not fillvalue:
+            # zeros is faster than full: pages are zeroed lazily by the OS
+            return numpy.zeros(shape, dtype)
+        return numpy.full(shape, fillvalue, dtype)
     if isinstance(out, numpy.ndarray):
         if product(shape) != product(out.shape):
             msg = f'cannot reshape {shape} to {out.shape}'
@@ -3863,7 +3991,7 @@ def create_output(
         if out.shape != shape:
             out = out.reshape(shape, copy=False)
         if fillvalue is not None:
-            out.fill(fillvalue)
+            out[...] = fillvalue
         return out
     if isinstance(out, str) and out[:6] == 'memmap':
         import tempfile
@@ -3874,11 +4002,11 @@ def create_output(
         with tempfile.NamedTemporaryFile(dir=tempdir, suffix=suffix) as fh:
             out = numpy.memmap(fh, shape=shape, dtype=dtype, mode=mode)
             if fillvalue is not None:
-                out.fill(fillvalue)
+                out[...] = fillvalue
             return out
     out = numpy.memmap(out, shape=shape, dtype=dtype, mode=mode)
     if fillvalue is not None:
-        out.fill(fillvalue)
+        out[...] = fillvalue
     return out
 
 
@@ -3911,24 +4039,24 @@ def case_sensitive_path(path: str, /) -> str:
         FileNotFoundError: Path does not exist or is not accessible.
 
     """
+    if os.path.exists(path):
+        return str(path)
+    path = os.path.abspath(path)
+    dirname, basename = os.path.split(path)
+    if dirname == path:
+        return dirname
+    dirname = case_sensitive_path(dirname)
+    basename = basename.lower()
     try:
-        if os.path.exists(path):
-            return str(path)
-        path = os.path.abspath(path)
-        dirname, basename = os.path.split(path)
-        if dirname == path:
-            return dirname
-        dirname = case_sensitive_path(dirname)
-        basename = basename.lower()
         with os.scandir(dirname) as it:
             for entry in it:
                 if entry.name.lower() == basename:
                     return os.path.join(dirname, entry.name)
-        msg = f'file {str(path)!r} not found'
-        raise FileNotFoundError(msg)
-    except (OSError, PermissionError) as exc:
+    except OSError as exc:
         msg = f'file {str(path)!r} not accessible'
         raise FileNotFoundError(msg) from exc
+    msg = f'file {str(path)!r} not found'
+    raise FileNotFoundError(msg)
 
 
 def xml2dict(
@@ -3950,7 +4078,8 @@ def xml2dict(
         sep: Sequence separator.
 
     Returns:
-        dict: Dictionary representation of XML element.
+        :
+            Dictionary representation of XML element.
 
     """
     at, tx = prefix or ('', '')
@@ -4101,7 +4230,7 @@ def main(argv: list[str] | None = None) -> int:
     elif '*' in argv[1]:
         files = glob(argv[1])
     elif os.path.isdir(argv[1]):
-        files = glob(f'{argv[1]}/*.*l?f')
+        files = glob(f'{argv[1]}/*.*')
         fltr = True
     else:
         files = argv[1:]
@@ -4118,6 +4247,14 @@ def main(argv: list[str] | None = None) -> int:
                 print()
                 if imshow is None:
                     continue
+                last = max(
+                    (
+                        i
+                        for i, image in enumerate(lif.images)
+                        if not image.is_flim
+                    ),
+                    default=-1,
+                )
                 for i, image in enumerate(lif.images):
                     if image.is_flim:
                         continue
@@ -4137,7 +4274,7 @@ def main(argv: list[str] | None = None) -> int:
                         imshow(
                             data,
                             title=repr(image),
-                            show=i == len(lif.images) - 1,
+                            show=i == last,
                             photometric=pm,
                             interpolation='None',
                         )
