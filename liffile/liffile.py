@@ -40,7 +40,7 @@ experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.11.8
+:Version: 2026.11.12
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -65,15 +65,22 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.11.11
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.8
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.12
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
 
 Revisions
 ---------
+
+2026.11.12
+
+- Fix infinite recursion on cyclic references in XLEF, XLCF, and XLLF files.
+- Fix images of all but first parent missing in LIFEXT files.
+- Fix BGR channel order and names of XLIF images referencing external files.
+- Raise LifFileError for dimensions with zero BytesInc.
 
 2026.11.8
 
@@ -108,28 +115,6 @@ Revisions
 - Support Python 3.15.
 
 2026.4.11
-
-- Add channel name resolution to LifImage via coords['C'] and coords['S'].
-- Drop support for Python 3.11.
-
-2026.2.16
-
-- Change timestamps to None if not present (breaking).
-- Fix inefficient timestamp parsing.
-- Fix inefficient LifFile.close().
-- Add tilescan property to LifImage.
-
-2026.2.15
-
-- Add experimental frame-based interface to LifImage.
-- Fix code review issues.
-
-2026.1.22
-
-- Fix reading sequence of LifMemoryBlocks.
-- Change unknown axis code to '?'.
-
-2026.1.14
 
 - …
 
@@ -229,7 +214,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.11.8'
+__version__ = '2026.11.12'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -1168,6 +1153,12 @@ class LifFile(BinaryFile):
         """Children references in XLEF, XLCF, and XLLF files."""
         dirname = self.dirname
         children: list[LifFile] = []
+        parent: LifFile | None = self
+        ancestors = set()
+        while parent is not None:
+            if parent.filepath:
+                ancestors.add(os.path.normcase(parent.filepath))
+            parent = parent._parent
         try:
             for child in self.xml_element.findall(
                 './Element/Children/Reference'
@@ -1181,6 +1172,11 @@ class LifFile(BinaryFile):
                 filename = os.path.join(dirname, filename)
                 if not os.path.exists(filename):
                     filename = case_sensitive_path(filename)
+                if os.path.normcase(os.path.abspath(filename)) in ancestors:
+                    logger().warning(
+                        f'{self!r} skipping cyclic reference to {filename!r}'
+                    )
+                    continue
                 children.append(
                     LifFile(
                         filename,
@@ -1724,8 +1720,7 @@ class LifImage(LifImageABC):
     def _is_bgr(self) -> bool:
         """Image has BGR channel order."""
         return (
-            len(self.memory_block.frames) == 0  # disable for frames
-            and self.sizes.get('S', 0) == 3
+            self.sizes.get('S', 0) == 3
             and len(self._channels) >= 2
             and self._channels[0].channel_tag == 3  # blue
             and self._channels[1].channel_tag == 2  # green
@@ -1739,6 +1734,8 @@ class LifImage(LifImageABC):
             memblock.type == LifMemoryBlockType.LOF
             and len(memblock.frames) == 1
         ):
+            # Block Offset is assumed 0.
+            # No existing files have non-zero offsets.
             path = os.path.join(self.parent.dirname, memblock.frames[0].file)
             if not os.path.exists(path):
                 path = case_sensitive_path(path)
@@ -1806,6 +1803,12 @@ class LifImage(LifImageABC):
         ch = 0
         for i, dim in enumerate(reversed(self._dimensions)):
             if squeeze and dim.number_elements < 2:
+                continue
+            if dim.bytes_inc == 0:
+                if dim.number_elements > 1:
+                    msg = f'{dim.label!r} dimension with {dim.bytes_inc=}'
+                    raise LifFileError(msg)
+                sizes[dim.label] = 1
                 continue
             if stride != dim.bytes_inc:
                 if dim.bytes_inc % stride == 0:
@@ -2074,6 +2077,9 @@ class LifImage(LifImageABC):
             which supports per-dimension selections and discontiguous storage.
 
         """
+        # TODO: support gaps between samples, planes, or channels
+        # TODO: support channels not starting at BytesInc 0
+        # Data is currently read contiguously
         shape = self.shape  # sets _shape_stored
         if self._shape_stored is None:
             data = self.memory_block.read_array(
@@ -2086,8 +2092,8 @@ class LifImage(LifImageABC):
                 self._shape_stored, self.dtype, mode=mode, out=out
             )
             data = data[tuple(slice(size) for size in shape)]
-        if self._is_bgr:
-            # BGR to RGB
+        if self._is_bgr and not self.memory_block.frames:
+            # BGR to RGB. External frames are decoded as RGB
             if not data.flags.writeable:
                 data = data[..., ::-1].copy()
             else:
@@ -3171,16 +3177,18 @@ class LifImageSeries(Sequence[LifImageABC]):
         elements = xml_element.findall('./Children/Element')
         if len(elements) < 1:
             elements = xml_element.findall('./Element')
+        bases = [base_path] * len(elements)
         if len(elements) < 1:
             # LIFEXT root, use MemoryBlockID as base path
-            childrenof = xml_element.find('./ChildrenOf')
-            if childrenof is not None:
-                base_path += childrenof.get('MemoryBlockID', '')
-                elements = childrenof.findall('./Element')
+            for childrenof in xml_element.findall('./ChildrenOf'):
+                base = base_path + childrenof.get('MemoryBlockID', '')
+                for element in childrenof.findall('./Element'):
+                    elements.append(element)
+                    bases.append(base)
 
-        for element in elements:
+        for base, element in zip(bases, elements, strict=True):
             name = element.attrib['Name']
-            path = name if base_path == '' else f'{base_path}/{name}'
+            path = name if base == '' else f'{base}/{name}'
             image = element.find('./Data/Image')
             if image is not None:
                 yield path, element
