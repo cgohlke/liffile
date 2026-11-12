@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.11.8
+:Version: 2026.11.12
 
 """
 
@@ -1631,6 +1631,8 @@ def test_xlef(name: str, memmap: Literal[False, True]) -> None:
         assert isinstance(data, numpy.ndarray)
         rgb = data.sum(dtype=numpy.uint64, axis=(0, 1)).tolist()
         assert rgb == [146107764, 141298533, 133919392]
+        assert im._is_bgr
+        assert array_equal(im.coords['S'], ['Red', 'Green', 'Blue'])
 
         assert im.memory_block.type == (
             LifMemoryBlockType.LOF if 'LOF' in name else LifMemoryBlockType.TIF
@@ -2980,6 +2982,32 @@ def test_children_closed_on_error(
             _ = xlef.children
         assert os.path.normcase(str(child)) in {
             os.path.normcase(p) for p in closed
+        }
+
+
+def test_lifext_children_of_multiple_parents() -> None:
+    """Test images of all ChildrenOf elements in LIFEXT XML are listed."""
+    xml = ElementTree.fromstring(
+        '<LMSDataContainerEnhancedHeader Version="1">'
+        '<ChildrenOf MemoryBlockID="MemBlock_1">'
+        '<Element Name="a"><Data><Image/></Data></Element>'
+        '</ChildrenOf>'
+        '<ChildrenOf MemoryBlockID="MemBlock_2">'
+        '<Element Name="b"><Data><Image/></Data></Element>'
+        '<Element Name="c"><Data><Image/></Data></Element>'
+        '</ChildrenOf>'
+        '</LMSDataContainerEnhancedHeader>'
+    )
+    paths = [path for path, _ in LifImageSeries._image_iter(xml)]
+    assert paths == ['MemBlock_1/a', 'MemBlock_2/b', 'MemBlock_2/c']
+
+    filename = DATA / 'XLEFReaderForBioformats/confocal LIFs'
+    filename /= '2020_06_23_sample 3 U2OS.lifext'
+    with LifFile(filename) as lifext:
+        assert len(lifext.images) == 6
+        assert {im.path.split('/', 1)[0] for im in lifext.images} == {
+            'MemBlock_613',
+            'MemBlock_617',
         }
 
 
