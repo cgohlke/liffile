@@ -13,7 +13,7 @@ experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.11.8
+:Version: 2026.11.12
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -38,15 +38,22 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.11.11
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.8
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.12
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
 
 Revisions
 ---------
+
+2026.11.12
+
+- Fix infinite recursion on cyclic references in XLEF, XLCF, and XLLF files.
+- Fix images of all but first parent missing in LIFEXT files.
+- Fix BGR channel order and names of XLIF images referencing external files.
+- Raise LifFileError for dimensions with zero BytesInc.
 
 2026.11.8
 
@@ -81,28 +88,6 @@ Revisions
 - Support Python 3.15.
 
 2026.4.11
-
-- Add channel name resolution to LifImage via coords['C'] and coords['S'].
-- Drop support for Python 3.11.
-
-2026.2.16
-
-- Change timestamps to None if not present (breaking).
-- Fix inefficient timestamp parsing.
-- Fix inefficient LifFile.close().
-- Add tilescan property to LifImage.
-
-2026.2.15
-
-- Add experimental frame-based interface to LifImage.
-- Fix code review issues.
-
-2026.1.22
-
-- Fix reading sequence of LifMemoryBlocks.
-- Change unknown axis code to '?'.
-
-2026.1.14
 
 - …
 
