@@ -4,6 +4,13 @@
 Revisions
 =========
 
+2026.11.12
+
+- Fix infinite recursion on cyclic references in XLEF, XLCF, and XLLF files.
+- Fix images of all but first parent missing in LIFEXT files.
+- Fix BGR channel order and names of XLIF images referencing external files.
+- Raise LifFileError for dimensions with zero BytesInc.
+
 2026.11.8
 
 - Fix reading stride-aligned RGB images and frames.
